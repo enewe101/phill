@@ -16,7 +16,7 @@ DATA_DIR = os.path.join(SCRIPT_DIR, "../../../data/processed")
 def train1(data_path=DATA_DIR):
 
     # Load a dataset
-    data = m.SentenceDataset(os.path.join(data_path, "sentences.index"))
+    data = m.LengthGroupedDataset(os.path.join(data_path, "sentences.index"))
     data.read()
     dictionary = m.Dictionary(os.path.join(data_path, "tokens.dict"))
 
@@ -52,6 +52,7 @@ def validate_dataset(data_path=DATA_DIR):
             print(heads_batch[i,:])
             print(relations)
             pdb.set_trace()
+
 
 
 def train_w2v(data_path=DATA_DIR):
@@ -125,7 +126,7 @@ def train_w2v(data_path=DATA_DIR):
         print(words)
         print(heads)
         print(similar)
-        
+
     print(timer)
     timer.write("timer", "w2v-padding-batch1000")
     return model
@@ -215,12 +216,14 @@ class Word2VecModel:
         # is most likely and is zero beyond the kernel.
         head_probs = self.get_head_probs(num_tokens)
         head_probs.unsqueeze(0).expand(500,-1,-1)
+
         # Tokens should not choose padding as head.
         head_probs = torch.where(
             tokens_batch.unsqueeze(1)==-1,
             torch.tensor([[[0]]], dtype=torch.float),
             head_probs.unsqueeze(0)
         )
+
         # Padding should always choose <ROOT> as head.
         head_probs = torch.where(
             tokens_batch.unsqueeze(2)==-1,
@@ -273,168 +276,16 @@ class Word2VecModel:
 
 
 
-
 class LanguageModel:
 
     def __init__(self, embedding_layer): 
         self.embedding = embedding_layer
 
-
     def sample_parses(self, tokens_batch):
-
-        num_sentences, num_tokens = tokens_batch.shape
-
-        energy = self.embedding.sentence_link_energy(tokens_batch)
-
-        head_selector = torch.distributions.Categorical(torch.exp(energy))
-
-        heads = torch.zeros(
-            (tokens_batch.shape[0], tokens_batch.shape[1],tokens_batch.shape[1]),
-            dtype=torch.long
-        )
-        heads[:,0,0] = 1
-
-        rooted = torch.zeros(tokens_batch.shape, dtype=torch.bool)
-        rooted[:,0] = 1
-
-        rooting = torch.zeros(tokens_batch.shape, dtype=torch.bool)
-        pointer_selector = torch.distributions.Categorical(~rooted)
-        pointer = pointer_selector.sample().unsqueeze(1)
-
-        sentence_head = torch.zeros(tokens_batch.shape[0], dtype=torch.long)
-        chose_root = torch.zeros(tokens_batch.shape[0], dtype=torch.bool)
-
-        num_turns = torch.tensor(0)
-        while True:
-
-            fully_rooted = rooted.logical_not().sum(dim=1) == 0
-
-            num_turns += 1
-            head_sample = head_selector.sample()
-            next_head = head_sample.gather(dim=1, index=pointer)
-
-            sentence_index = torch.arange(tokens_batch.shape[0], dtype=torch.long)
-            adjacency_rows = one_hot(next_head.squeeze(),tokens_batch.shape[1])
-            heads[sentence_index,pointer.squeeze()] = adjacency_rows
-
-            # If we chose a new head for the sentence, record that.
-            chose_root = (next_head == 0)
-
-            # Mark this token as "rooting"
-            rooting[sentence_index, pointer.squeeze()] = True
-
-            new_rooted = (
-                # If next_head was rooted, everything rooting becomes rooted
-                rooted[sentence_index, next_head.squeeze()].unsqueeze(1) 
-                * rooting  + 
-                # If we did not chose a new sentence head, preserve rooted
-                ~chose_root * rooted + 
-                # Or if we are fully rooted, then also preserve rooted
-                fully_rooted.unsqueeze(1) * rooted
-                # Otherwise next_head must be <ROOT> and there is a contest
-                # with a previous sentence head
-            )
-            # Regardlesss, <ROOT> (position 0) is always rooted.
-            new_rooted[:,0] = True
-
-            # If next_head is root then the previous sentence head is 
-            # bumped, so it and its children are once again rooting.
-            # If we chose an unrooted token, then we should just add that
-            # to rooting.  If neither condition holds (I.e. we are joining
-            # an already-rooted sub-tree) then rooting just resets.
-            rooting = (
-                # If chose <ROOT>, previously rooted becomes rooting (bumped)
-                # Except if we have fully rooted the sentence
-                chose_root * fully_rooted.logical_not().unsqueeze(1) * rooted + 
-                # If chose a rooted token, rooting becomes rooted.
-                ~rooted[sentence_index, next_head.squeeze()].unsqueeze(1)
-                * rooting
-            )
-            # <ROOT> is never rooting (it is always already rooted)
-            rooting[:,0] = False
-
-            # this will either be empty or it will contain
-            # the children of the previous head.
-            rooted = new_rooted
-
-            # Update fully rooted again, having recalculated rooted and rooting
-            fully_rooted = rooted.logical_not().sum(dim=1) == 0
-
-            if fully_rooted.sum() == tokens_batch.shape[0]:
-                print(
-                    tokens_batch.shape[0], 
-                    "sentences that are", tokens_batch.shape[1], 
-                    "tokens_batch long are rooted after",
-                    num_turns, "turns."
-                )
-                break
-
-            # if next_head was rooted, sample an unrooted pointer, otherwise
-            # use next_head
-            make_root_absorbing = fully_rooted.unsqueeze(1) * one_hot(
-                torch.tensor(0), tokens_batch.shape[1])
-            pointer_probabilities =  rooted.logical_not() + make_root_absorbing
-            pointer_selector = torch.distributions.Categorical(
-                pointer_probabilities
-            )
-
-            do_sample = (
-                ~chose_root 
-                * rooted[sentence_index, next_head.squeeze()].unsqueeze(1)
-                + chose_root * (sentence_head == 0).unsqueeze(1)
-            )
-
-            new_pointer = (
-                # If next_head was rooted, but isn't <ROOT>
-                # Or if we chose <ROOT> but there was no prior sentence head
-                # then sample.
-                do_sample * pointer_selector.sample().unsqueeze(1)
-                + (~rooted[sentence_index, next_head.squeeze()]).unsqueeze(1) 
-                * next_head
-                + chose_root * sentence_head.unsqueeze(1)
-            )
-
-            new_pointer =(
-                fully_rooted.logical_not().unsqueeze(1) * new_pointer)
-
-            # Points to the current sentence head
-            sentence_head = (
-                chose_root * next_head 
-                + ~chose_root * sentence_head.unsqueeze(1)
-            ).squeeze(1)
-
-            pointer = new_pointer
-
-
-
-        return heads
-
-
-        # First, just try to figure out an algorithm to sample the parses
-        # of one sentence.
-        # There are many possible ways to approach it, but the main issue
-        # is that we want to structurally enforce sampling from the valid
-        # trees according to the mathematical model.
-        #
-        # One way to sample only trees is to do as follows
-        #   1. sample one edge.
-        #   2. always consider the "cursor" to point to the head in the most 
-        #       recently selected edge.
-        #   3. Sample from the cursor's possible choices of head.
-        #   4. Repeat 3 until we select the root.  Mark all tokens attached
-        #       to an edge so far as "rooted"
-        #   5. Allow every unrooted token to sample a new head.
-        #   6. Mark any token that takes a rooted token as its head as rooted.
-        #   7. Continue until all tokens are rooted.
-
-        #Sample from trees.  Cannot express conflict or crowding between
-        #tokens as they select their head.
-        # 1. calculate the vector-covector energies
-        # 2. sample one edge with head root. the subordinate is "rooted".
-        # 3. sample one unrooted subordinate having rooted head.
-        # 4. repeat until there are no unrooted subordinates.
-
-
+        #return m.sp.sample_parses(self, tokens_batch)
+        #return m.sp.sample_parses_new(self, tokens_batch)
+        sampler = m.sp.ContentionResampler()
+        return sampler.sample(tokens_batch, self.embedding)
 
 
     def gibbs_step_tokens():

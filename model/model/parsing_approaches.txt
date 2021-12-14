@@ -1,0 +1,100 @@
+
+1) A valid parse tree can be defined as follows
+
+Def A
+A DAG in which each node can have only one parent, where one node 
+"sentence_head" has no parents.
+
+Def B
+A DAG in which each node can have only one parent, where one node 
+"<ROOT>" has no parents and exactly one child ("sentence_head")
+
+Def C
+A DAG in which each node has exactly one child, except one node
+"<ROOT>" which has no children and only one parent.
+
+
+
+2) Ways to sample
+
+Random walk sampler:
+
+Generates uniform random legal trees: True
+Generates edge-factored weight random legal trees: False
+
+We construct a tree by randomly walking between nodes.  This means that we have
+a pointer that is at some node i, and iteratively takes steps to other nodes
+j.  We chose the node j with probability proportional to the nonnegative weight
+of the edge i -> j.  We will sometimes revisit a previously visited node.  In 
+that case, the old outgoing edge is dropped (maintaining the one-child rule 
+of Def C).  We will sometimes visit <ROOT>.  <ROOT> can't have a child, so
+the pointer must be reset.  We reset it to one of the other nodes that already
+had <ROOT> as child, since <ROOT> should only have one parent.  If this node
+chooses non-<ROOT>, the algorithm continues normally, if it again chooses
+<ROOT>, we again reset the pointer to a different parent of root, and continue.
+If there was no prior parent of root, then we reset the pointer to a random
+node.
+
+
+
+Random walk with "rooting".
+
+A modified version of this was able to reproduce a uniform distribution over
+directed trees with all edges pointing toward <ROOT>.  It went as follows.
+Whenever we reach <ROOT>, all the nodes in the ancestry of the node that chose
+<ROOT> are marked as "rooted".  If this is the first time we reach <ROOT>,
+we reset the pointer to a randomly chosen unrooted node.  Now, whenever we move
+to a node that is marked rooted, we similarly mark all nodes in the ancestry
+of the node that selected the rooted node, and randomly reset the pointer.
+
+If when we reach <ROOT> it is not the first time, then we will break the 
+previous link between <ROOT> and its previous parent, and move the pointer to
+that previous parent of <ROOT>.  The walk then continues, and if we reach a
+rooted token, or <ROOT>, all the nodes still in that parent's ancestry are
+marked as rooted as usual.
+
+
+
+
+Random walk with <ROOT>-reset
+
+In this modified random walk there are two phases: tree growing and rooting.
+During the tree growing phase, we take random steps adding an edge between
+the current pointer and the head that it chooses.  However, if <ROOT> is chosen
+then no edge is made and the pointer is randomly reset.
+
+
+Wilson's cycle popping algorithm
+
+In wilsons algorithm, everything is conditioned on selecting a root first.
+Then, we select, random heads for every node.  If nodes are in a cycle, we
+again randomly select heads for those nodes, repeating until eventually no
+cycle is detected.
+
+
+Closely related is the loop-erased random walk:
+Pick a root.  Then, select randomly "unrooted" token, and move to it, creating
+the directed edge implied by the movement.  Continue unless
+ a) you hit <ROOT> or a token marked rooted.  
+	Then mark all tokens still on the walk as rooted, and 
+	start a new walk from a randomly selected unrooted node.
+ b) you create a cycle.  Then delete the cycle, and restart from the latest
+	node in the walk that did not become part of the cycle.
+
+
+Something to try:
+Adaptation of Wilson's method:
+All nodes randomly select a head.
+While nodes are involved in loops, redraw heads for all those nodes.
+While more than one token selects <ROOT> as head, redraw heads for those nodes.
+
+
+What I don't like about picking a root independently of the edge weights:
+ - There should be some tradeoff between a given node selecting non-root 
+	heads vs. <ROOT>.
+ - E.g. a subclause's head should learn to feel ambivalent between choosing the
+	parent sentence's head or <ROOT>, while the parent sentence's head should
+	be able to learn to favour choosing root over the subclause.
+
+
+

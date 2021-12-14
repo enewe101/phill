@@ -39,10 +39,11 @@ class EmbeddingLayer(nn.Module):
 
 
     def link_energy(self, tokens_batch, heads_batch):
-        return (torch.sum(
+        return_val = (torch.sum(
             self.U[tokens_batch] * self.V[heads_batch],
             dim=2, keepdim=True
         ) + self.Ubias[tokens_batch] + self.Vbias[heads_batch]).squeeze(2)
+        return return_val
 
 
     def sentence_link_energy(self, tokens_batch, mask=True):

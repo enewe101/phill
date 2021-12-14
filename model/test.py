@@ -1,11 +1,15 @@
 import os
-from collections import Counter
-from unittest import TestCase, main
-import torch
 import pdb
-import model as m
-import numpy as np
+import time
 import random
+import itertools as it
+from unittest import TestCase, main
+from collections import Counter
+
+import numpy as np
+import torch
+
+import model as m
 
 
 def seed_random(seed):
@@ -261,6 +265,230 @@ class Word2VecModelTest(TestCase):
         probs = probs / probs.sum(dim=1, keepdim=True)
 
         self.assertTrue(torch.allclose(counts, probs, atol=1e-2))
+
+
+class ContentionSamplerTest(TestCase):
+
+    def test_has_cycle(self):
+        heads = torch.tensor([
+            [0,2,3,4,0],
+            [0,2,3,2,0],
+            [0,2,3,1,1],
+            [0,3,4,2,1]
+        ])
+        expected_cycle = torch.tensor([
+            [0,0,0,0,0],
+            [0,0,1,1,0],
+            [0,1,1,1,0],
+            [0,1,1,1,1]
+        ])
+
+        sampler = m.sp.Contention()
+        found_cycle = sampler.has_cycle(heads)
+
+        self.assertTrue(torch.all(found_cycle == expected_cycle))
+
+
+    def test_is_multiple_root(self):
+        heads = torch.tensor([
+            [0,2,3,4,0],
+            [0,0,3,4,0],
+            [0,2,0,0,1],
+            [0,0,0,0,2],
+            [0,0,0,0,0],
+        ])
+        expected_multiple_root = torch.tensor([
+            [0,0,0,0,0],
+            [0,1,0,0,1],
+            [0,0,1,1,0],
+            [0,1,1,1,0],
+            [0,1,1,1,1],
+        ])
+
+        sampler = m.sp.Contention()
+        found_multiple_root = sampler.is_multiple_root(heads)
+
+        self.assertTrue(torch.all(found_multiple_root == expected_multiple_root))
+
+
+
+
+class ParseSamplingMeasureTests(TestCase):
+
+    def make_tree_counter(self):
+
+        # Construct a counter for each possible rooted, labelled tree
+        # on four nodes.  An easy way to find all trees is to encode
+        # a tree as a tuple where position i of the tuple contains the 
+        # the label of the head chosen by the ith node.  This provides
+        # a unique encoding for each tree so we can easily avoid duplication.
+
+        # Notice that there are four un-labelled tree structures, which we 
+        # name based on resemblance to letters:
+        #    el:  |    j:  |    h: |    m:  |
+        #         |       | |      |       |||
+        #         |         |     | |
+        #         |  
+        #
+        # By checking each permutation of labels over each structure,
+        # and encoding the tree in a tuple, we can find all labelled trees.
+        # Not all label permutations over a given unlabelled structure yield
+        # unique trees, but our encoding is unique, so this duplication is 
+        # easily eliminated.
+        trees = set()
+        for perm in it.permutations([1,2,3,4]):
+            # Apply each permutation to each unlabelled structure, and then
+            # generate the unique encoding for that tree, and add it to a set.
+            el_tree = [0] * 5
+            el_tree[perm[0]] = 0
+            el_tree[perm[1]] = perm[0]
+            el_tree[perm[2]] = perm[1]
+            el_tree[perm[3]] = perm[2]
+            trees.add(tuple(el_tree))
+
+            j_tree = [0] * 5
+            j_tree[perm[0]] = 0
+            j_tree[perm[1]] = perm[0]
+            j_tree[perm[2]] = perm[0]
+            j_tree[perm[3]] = perm[2]
+            trees.add(tuple(j_tree))
+
+            h_tree = [0] * 5
+            h_tree[perm[0]] = 0
+            h_tree[perm[1]] = perm[0]
+            h_tree[perm[2]] = perm[1]
+            h_tree[perm[3]] = perm[1]
+            trees.add(tuple(h_tree))
+
+            m_tree = [0] * 5
+            m_tree[perm[0]] = 0
+            m_tree[perm[1]] = perm[0]
+            m_tree[perm[2]] = perm[0]
+            m_tree[perm[3]] = perm[0]
+            trees.add(tuple(m_tree))
+
+        # Make a counter indexed by the tuple encoding each tree.
+        return {tree:0 for tree in trees}
+
+
+    def test_contention_uniform(self):
+        sampler = m.sp.Contention()
+        self.sample_parses_uniform_test(sampler)
+
+    def test_cycle_proof_walk_with_rerooting_uniform(self):
+        sampler = m.sp.CycleProofRerooting()
+        self.sample_parses_uniform_test(sampler)
+
+    def test_root_reset_uniform(self):
+        sampler = m.sp.RootReset()
+        self.sample_parses_uniform_test(sampler)
+
+
+    def sample_parses_uniform_test(self, sampler):
+
+        seed_random(0)
+
+        start = time.time()
+        vocab = 5
+        num_sentences = 120000
+
+        # Make all embeddingn parameters equal to constant 0.1 so that
+        # every tree should be equally likely.
+        with torch.no_grad():
+            embedding = m.EmbeddingLayer(vocab,4)
+            embedding.U[:,:] = 0.1
+            embedding.V[:,:] = 0.1
+            embedding.Ubias[:,:] = 0.1
+            embedding.Vbias[:,:] = 0.1
+
+        tokens_batch = torch.tensor([[0,1,2,3,4]]).expand(num_sentences,-1)
+
+        # First we will make a set of all possible rooted trees constructed
+        # with four labelled nodes.  
+        tree_counter = self.make_tree_counter()
+
+        # Count the occurrences of each tree generated by the model
+        trees = sampler.sample(tokens_batch, embedding)
+        for i in range(trees.shape[0]):
+            tree = tuple(trees[i].tolist())
+            tree_counter[tree] += 1
+        frequencies = torch.tensor([
+            val / (num_sentences)
+            for val in tree_counter.values()
+        ])
+
+        # The frequencies should be uniform and all close to 1 / num_trees:
+        pdb.set_trace()
+        expected_frequency = torch.tensor([1/len(tree_counter)])
+        self.assertTrue(torch.allclose(
+            frequencies,
+            expected_frequency,
+            atol=0.0035
+        ))
+
+
+    def test_contention_nonuniform(self):
+        sampler = m.sp.Contention()
+        self.nonuniform_test(sampler)
+        
+
+    def test_cycle_proof_rerooting_nonuniform(self):
+        sampler = m.sp.CycleProofRerooting()
+        self.nonuniform_test(sampler)
+
+
+    def nonuniform_test(self, sampler):
+
+        seed_random(0)
+
+        start = time.time()
+        vocab = 5
+        num_sentences = 100000
+
+        # Embedding layer random.  Each tree should have a probability 
+        # proportional to its energy
+        embedding = m.EmbeddingLayer(vocab,4)
+
+        tokens_batch = torch.tensor([[0,1,2,3,4]])
+
+        # First we will make a set of all possible rooted trees constructed
+        # with four labelled nodes.  
+        tree_counter = self.make_tree_counter()
+
+        expected_trees = torch.tensor(sorted(list(tree_counter.keys())))
+        energies = embedding.link_energy(
+            tokens_batch.expand(len(expected_trees), -1),
+            expected_trees
+        )
+        # energies[:,0] = 0 # It's not clear if we should do this or not
+        expected_probs = torch.exp(energies.sum(dim=1))
+        expected_probs = expected_probs / expected_probs.sum()
+
+        # Count the occurrences of each tree generated by the model
+        start = time.time()
+        trees = sampler.sample(tokens_batch.expand(num_sentences, -1), embedding)
+        elapsed = time.time() - start
+        for i in range(trees.shape[0]):
+            tree = tuple(trees[i].tolist())
+            tree_counter[tree] += 1
+
+        found_probs = torch.zeros(len(tree_counter))
+        for i, tree in enumerate(expected_trees.tolist()):
+            found_probs[i] = tree_counter[tuple(tree)] / num_sentences
+
+        # The frequencies should be uniform and all close to 1 / num_trees:
+        torch.set_printoptions(sci_mode=False)
+        print("Elapsed:", elapsed)
+        print((found_probs - expected_probs).abs().mean())
+        pdb.set_trace()
+        self.assertTrue(torch.allclose(
+            found_probs,
+            expected_probs,
+            atol=0.005
+        ))
+
+
+
 
 
 
