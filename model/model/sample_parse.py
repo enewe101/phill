@@ -1,6 +1,7 @@
 import torch
 from torch.nn.functional import one_hot
 import pdb
+import model as m
 
 
         # One way to sample only trees is to do as follows
@@ -88,10 +89,16 @@ class Contention():
 
     def has_cycle(self, heads):
         """
-        iteratively move token i's head-pointer to that of it's head.
-        The pointer will eventually either cycle or absorb to zero.
-        The pointer advances 2^i steps in each iteration, so
-        even a structure of length n will root in log n steps.
+        A node is on a loop if it can reach itself by taking enough hops
+        along directed edges.  To find the nodes that participate in cycles,
+        continually "make hops" by taking higher and higher powers of the 
+        adjacency matrix (built from ``heads``).
+        I.e., A tells you what node j can be reached from i in one hop, while
+        A^2 tells nodes j reachable in two hops from i.  
+        if you take A + A^2 + A^3 + ... A^n, where n is the number of tokens
+        in the sentence, then even the longest loop will visit all its members.
+        So, the diagonal of sum_n(A^n) tells you which nodes participate in 
+        loops.
         """
         max_steps = heads.shape[1]
         adjacency = torch.nn.functional.one_hot(
@@ -106,6 +113,237 @@ class Contention():
         return has_cycle
         
 
+class ParityTokenResampler:
+
+    def __init__(self, Px):
+        self.Px = Px
+        self.unigram_sampler = torch.distributions.Categorical(self.Px)
+
+
+    def get_node_parity(self, head_ptrs):
+        """ 
+        Accepts a (*, sentence_length)-shaped batch of heads_ptr vectors,
+        containing trees, and returns a (*, 2, sentence_length)-shaped batch of
+        "node-parities".
+
+        The parity of a node i True if it is an odd number of hops from ROOT
+        and FALSE if it is an even number of hops.  ROOTs parity is False.
+        """
+        # We want to partition nodes into two groups: those which are an 
+        # even number of steps from the root, and those which are an odd number. 
+
+        # Our approach will be to continually follow links toward the root.
+        # Starting with head_ptrs, we recursively index head_ptrs into itself.
+        # This has the effect that the value we see at each index i 
+        # carries the location (index) of nodes reachable from i during a 
+        # walk toward the root.  Every node in a tree eventually reaches the
+        # root.  Because ROOT has a self-link, once a location in the array 
+        # points to ROOT (index 0), it will remain constant.
+
+        # To observe the parity of a node, we continually check whether each
+        # location in the array is 0 (at ROOT), and XOR this with a node_parity
+        # array that is initially zero. Once nodes reach root, their
+        # corresponding parity value will continually toggle.  Once all nodes
+        # are at ROOT, we stop, and the parity value will reflect the parity of
+        # the step on which that node reached ROOT.  This gives the correct
+        # relative parity, but all parities might have to be toggled one more
+        # time for parities to be recorded with ROOT as even.  Also, ROOTs
+        # parity will come out wrong, because of ROOTs self loop, which gets
+        # cleaned up.
+
+        node_parity = torch.zeros(head_ptrs.shape, dtype=torch.bool)
+        reachable = head_ptrs
+        while True:
+            node_parity = node_parity ^ (reachable == 0)
+            reachable = head_ptrs.gather(dim=-1, index=reachable)
+            if not torch.any(reachable):
+                break
+
+        # ROOT's self-loop causes its parity to be wrong. Fix that. 
+        node_parity[...,0] = node_parity[...,0] ^ True
+
+        # Parities are *relatively* correct, but may all have to be toggled
+        # for the parity of ROOT to be False. Toggle if needed.
+        needs_toggle =  node_parity[...,0]
+        needs_toggle = needs_toggle.unsqueeze(len(node_parity.shape)-1)
+        needs_toggle = needs_toggle.expand(node_parity.shape)
+        node_parity = node_parity ^ needs_toggle
+
+        return node_parity
+
+
+    # TODO: There is probably a more efficient way to do this.
+    # Rather than recalculate the full sentence energy for every point-mutation
+    # we could calculate the link energy for every <mut|orig> and every 
+    # <orig|mut>.  Then the energy of every point mutation can be calculated
+    # as a sum across the original sentences link energies, and the 
+    # mutated ones.  This reduces the number of sentence link energies from
+    # n+1 to 3, at the cost of some sums and lookups.  Should be faster and 
+    # preserve gram.
+    def sample_tokens(self, tokens_batch, head_ptrs, embedding):
+        m.timer.start()
+        num_sentences, num_tokens = tokens_batch.shape
+
+        # Randomly sample a bunch of nodes from the unigram distribution
+        # But preserve the node at position 0 to be ther ROOT token
+        # CONSIDER: should we prevent noise_batch from sampling ROOT?
+        noise_batch = self.unigram_sampler.sample(tokens_batch.shape)
+        noise_batch[:,0] = 0
+
+        # Generate a new num_tokens new versions of each sentence wherein
+        # new version i has token i replaced with token i of the noise batch.
+        substitution_pattern = torch.eye(
+            num_tokens, dtype=torch.bool).unsqueeze(0)
+        single_token_mutations = torch.where(
+            substitution_pattern,
+            noise_batch.unsqueeze(1),
+            tokens_batch.unsqueeze(1)
+        )
+
+        # De-reference the head tokens, both for the original sentence...
+        heads = tokens_batch.gather(dim=1, index=head_ptrs)
+        # ...and for the mutated sentences.
+        head_ptrs_index = head_ptrs.unsqueeze(1).expand(-1,num_tokens,-1)
+        head_mutations = single_token_mutations.gather(
+            dim=2, index=head_ptrs_index)
+
+        # Calculate the total energy of sentences in original and mutated 
+        # version.
+        with torch.no_grad():
+            m.timer.log("setup")
+            mutation_energy = embedding.link_energy(
+                single_token_mutations, head_mutations).sum(dim=2)
+            m.timer.log('mutation-energy')
+            initial_energy = embedding.link_energy(
+                tokens_batch, heads).unsqueeze(1).expand(
+                -1,num_tokens,-1).sum(dim=2)
+            m.timer.log('initial-energy')
+
+        # Calculate the metropolis-hastings acceptance score, then either
+        # accept or reject each mutation.
+        proposal_weights = self.Px[heads] / self.Px[noise_batch]
+        accept_score = proposal_weights * torch.exp(
+            mutation_energy - initial_energy)
+        reject_score = torch.rand(tokens_batch.shape)
+        do_accept = accept_score > reject_score
+
+        # Rather than return each individually mutated sentence, we collapse
+        # all mutations into two sentences: one taking all mutations in 
+        # tokens that are an even number of steps from the root, and one
+        # taking all mutations in tokens that are an odd number of steps from
+        # the root.  This allows us to consider model expectations along all
+        # visible.
+        node_parity = self.get_node_parity(head_ptrs)
+        do_accept = do_accept
+        tokens_mutated = torch.empty(
+            (num_sentences, 2, num_tokens), dtype=torch.int64)
+        tokens_mutated[:,0,:] = torch.where(
+            do_accept.logical_and(node_parity==0), noise_batch, tokens_batch,
+        )
+        tokens_mutated[:,1,:] = torch.where(
+            do_accept.logical_and(node_parity), noise_batch, tokens_batch,
+        )
+        m.timer.log('setdown')
+
+        return tokens_mutated
+
+
+    def sample_tokens_fast(self, tokens_batch, head_ptrs, embedding):
+        m.timer.start()
+        num_sentences, num_tokens = tokens_batch.shape
+
+        # Randomly sample a bunch of nodes from the unigram distribution
+        mutants_batch = self.unigram_sampler.sample(tokens_batch.shape)
+
+        # Generate two new token lists for each sentence based on mutants_batch.
+        # Generate a new token list which contains, at position i, the
+        # dereferenced head of i if its head had mutated.
+        mutant_heads = mutants_batch.gather(dim=1, index=head_ptrs)
+        heads = tokens_batch.gather(dim=1, index=head_ptrs)
+        
+        # Calculate the total energy of sentences in original and mutated 
+        # version.
+        with torch.no_grad():
+            m.timer.log("setup")
+            mutant_head_energy = embedding.link_energy(
+                tokens_batch, mutant_heads)
+            mutant_sub_energy = embedding.link_energy(
+                mutants_batch, heads)
+            m.timer.log("mutation-energy")
+            normal_energy = embedding.link_energy(
+                tokens_batch, heads)
+            m.timer.log('initial-energy')
+
+        # Calculate the energy for each possible point mutation.
+        # At each position i, take the energy from either 
+        # (a) mutan_head_energy, (b) mutant_sub_energy, or (c) normal energy,
+        # depending on whether that point i is (a) the point mutation,
+        # (b) a sub of the point mutation, or (c) neither
+        sub_mutation = torch.eye(num_tokens, dtype=torch.bool)
+        sub_mutation = sub_mutation.unsqueeze(0).expand(num_sentences, -1, -1)
+        head_mutation = sub_mutation.gather(
+            dim=2, index=head_ptrs.unsqueeze(1).expand(-1, num_tokens, -1))
+
+        # Construct the link energy for each possible point mutation by
+        # selecting values from the three energies already calculated,
+        # depending on whether there is a point mutation at i (take
+        # mutant_sub_energy), a point mutation at i's head (take
+        # mutant_head_energy), or neither (take normal_energy).
+        mutation_energy = torch.empty(num_sentences, num_tokens, num_tokens)
+        mutation_energy = torch.where(
+            (sub_mutation.logical_or(head_mutation)).logical_not(),
+            normal_energy.unsqueeze(1).expand(-1, num_tokens, -1),
+            mutation_energy
+        )
+        # At locations that are mutated, take the mutant sub energy.
+        mutation_energy = torch.where(
+            sub_mutation,
+            mutant_sub_energy.unsqueeze(1).expand(-1, num_tokens, -1),
+            mutation_energy
+        )
+        # At locations whose head was mutated, take the mutant head energy.
+        mutation_energy = torch.where(
+            head_mutation,
+            mutant_head_energy.unsqueeze(1).expand(-1, num_tokens, -1),
+            mutation_energy
+        )
+
+        # Now calculate total sentence energy for the normal sentences
+        # and for each possible point mutation of normal sentences.
+        normal_energy = normal_energy.sum(dim=1)
+        mutation_energy = mutation_energy.sum(dim=2)
+
+        # Calculate the metropolis-hastings acceptance score, then either
+        # accept or reject each mutation.
+        proposal_weights = self.Px[tokens_batch] / self.Px[mutants_batch]
+
+        accept_score = proposal_weights * torch.exp(
+            mutation_energy
+            - normal_energy.unsqueeze(1).expand(-1, num_tokens)
+        )
+
+        reject_score = torch.rand(tokens_batch.shape)
+        do_accept = accept_score > reject_score
+
+        # Rather than return each individually mutated sentence, we collapse
+        # all mutations into two sentences: one taking all mutations in 
+        # tokens that are an even number of steps from the root, and one
+        # taking all mutations in tokens that are an odd number of steps from
+        # the root.  This allows us to consider model expectations along all
+        # visible.
+        node_parity = self.get_node_parity(head_ptrs)
+        do_accept = do_accept
+        tokens_mutated = torch.empty(
+            (num_sentences, 2, num_tokens), dtype=torch.int64)
+        tokens_mutated[:,0,:] = torch.where(
+            do_accept.logical_and(node_parity==0), mutants_batch, tokens_batch,
+        )
+        tokens_mutated[:,1,:] = torch.where(
+            do_accept.logical_and(node_parity), mutants_batch, tokens_batch,
+        )
+        m.timer.log('setdown')
+
+        return tokens_mutated
 
 
 class CycleProofRerooting2:
@@ -308,7 +546,6 @@ class CycleProofRerooting:
 
             heads[sentence_index,pointer.squeeze()] = next_head
 
-
             # If we chose a new head for the sentence, record that.
             chose_root = (next_head.unsqueeze(1) == 0)
 
@@ -471,3 +708,5 @@ class RootReset:
 
         head = tokens_batch.gather(dim=1, index=head_ptr)
         return head
+
+

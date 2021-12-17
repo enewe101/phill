@@ -35,26 +35,6 @@ def train1(data_path=DATA_DIR):
         # and calculate loss...
 
 
-def validate_dataset(data_path=DATA_DIR):
-    data = m.SentenceDataset(os.path.join(data_path, "sentences.index"))
-    data.read()
-    token_dictionary = m.Dictionary(os.path.join(data_path, "tokens.dict"))
-    relation_dictionary = m.Dictionary(os.path.join(data_path, "relations.dict"))
-
-    pdb.set_trace()
-    for tokens_batch, heads_batch, relations_batch in data:
-        for i in range(tokens_batch.shape[0]):
-            token_ids = tokens_batch[i,:]
-            tokens = token_dictionary.get_tokens(token_ids)
-            relation_ids = relations_batch[i,:]
-            relations = relation_dictionary.get_tokens(relation_ids)
-            print(tokens)
-            print(heads_batch[i,:])
-            print(relations)
-            pdb.set_trace()
-
-
-
 def train_w2v(data_path=DATA_DIR):
 
     lr = 1e-2
@@ -76,7 +56,7 @@ def train_w2v(data_path=DATA_DIR):
     optimizer = torch.optim.SGD(embedding.parameters(), lr=lr)
 
     # Draw a positive batch from the dataset
-    timer = Timer()
+    m.timer.start()
     for epoch in range(num_epochs):
         epoch_loss = torch.tensor(0.)
 
@@ -87,11 +67,11 @@ def train_w2v(data_path=DATA_DIR):
                 continue
 
             with torch.no_grad():
-                timer("setup")
+                m.timer.log("setup")
                 positive_heads = model.sample_parses(tokens_batch)
                 negative_heads = model.sample_tokens(
                     tokens_batch, positive_heads)
-                timer("sample")
+                m.timer.log("sample")
 
             mask = (tokens_batch == -1)
             mask[:,0] = True
@@ -105,12 +85,12 @@ def train_w2v(data_path=DATA_DIR):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            timer("grad")
+            m.timer.log("grad")
 
             with torch.no_grad():
                 epoch_loss += loss/(tokens_batch.shape[0]*tokens_batch.shape[1])
 
-        print(timer)
+        print(m.timer.repr())
 
         words = ["recently", "ran", "Paris", "debt", "doctor", "is"]
         ids = dictionary.get_ids(words)
@@ -127,8 +107,8 @@ def train_w2v(data_path=DATA_DIR):
         print(heads)
         print(similar)
 
-    print(timer)
-    timer.write("timer", "w2v-padding-batch1000")
+    print(m.timer.repr())
+    m.timer.write("timer", "w2v-padding-batch1000")
     return model
 
 
@@ -146,35 +126,6 @@ def print_tree(headlist, curnode=0, depth=0):
             continue
 
         print_tree(headlist, curnode=child, depth=depth+1)
-
-
-class Timer:
-
-    def __init__(self):
-        self.mark = time.time()
-        self.times = defaultdict(int)
-
-    def __call__(self, index):
-        self.times[index] += time.time() - self.mark
-        self.mark = time.time()
-
-    def times(self):
-        return self.times
-
-    def __repr__(self):
-        return self.__str__()
-
-    def __str__(self):
-        max_key = max([len(key) for key in self.times])
-        return "".join([
-            f"{key:<{max_key}} : {val}\n" 
-            for key, val in self.times.items()
-        ])
-
-    def write(self, path, msg=""):
-        with open(path, 'a') as f:
-            f.write(msg + "\n")
-            f.write(str(self) + "\n")
 
 
 
@@ -287,10 +238,30 @@ class LanguageModel:
         sampler = m.sp.ContentionResampler()
         return sampler.sample(tokens_batch, self.embedding)
 
-
     def gibbs_step_tokens():
         # Resample some of the words
         pass
+
+
+
+def view_dataset(data_path=DATA_DIR):
+    data = m.SentenceDataset(os.path.join(data_path, "sentences.index"))
+    data.read()
+    token_dictionary = m.Dictionary(os.path.join(data_path, "tokens.dict"))
+    relation_dictionary = m.Dictionary(os.path.join(data_path, "relations.dict"))
+
+    pdb.set_trace()
+    for tokens_batch, heads_batch, relations_batch in data:
+        for i in range(tokens_batch.shape[0]):
+            token_ids = tokens_batch[i,:]
+            tokens = token_dictionary.get_tokens(token_ids)
+            relation_ids = relations_batch[i,:]
+            relations = relation_dictionary.get_tokens(relation_ids)
+            print(tokens)
+            print(heads_batch[i,:])
+            print(relations)
+            pdb.set_trace()
+
 
 
 

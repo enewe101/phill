@@ -1,0 +1,95 @@
+init
+init
+sample-noise                   : 0.26791882514953613
+generate-point-mutations       : 0.06081199645996094
+head-deref                     : 0.09000611305236816
+energy                         : 2.142709970474243
+metropolis-hastings-acceptance : 0.024512290954589844
+splice-mutants                 : 43.85667109489441
+
+init
+sample-noise                   : 0.27644777297973633
+generate-point-mutations       : 0.06254053115844727
+head-deref                     : 0.09647870063781738
+energy                         : 2.166921854019165
+metropolis-hastings-acceptance : 0.025974273681640625
+node-parity                    : 43.92933630943298
+splice-mutants                 : 0.008656978607177734
+
+test-any-reachable
+sample-noise                   : 0.270768404006958
+generate-point-mutations       : 0.06086897850036621
+head-deref                     : 0.08897113800048828
+energy                         : 2.1101720333099365
+metropolis-hastings-acceptance : 0.02430415153503418
+node-parity                    : 8.920483112335205
+splice-mutants                 : 0.00922846794128418
+
+more-detailed
+sample-noise                   : 0.27965402603149414
+generate-point-mutations       : 0.06247401237487793
+head-deref                     : 0.08942198753356934
+energy                         : 2.1119980812072754
+metropolis-hastings-acceptance : 0.02403402328491211
+parity-update                  : 0.18579506874084473
+mat-mul                        : 8.534068584442139
+any-reachable-test             : 0.17737722396850586
+xor-a-digit                    : 8.106231689453125e-05
+node-parity                    : 0.07695198059082031
+reshape-accept                 : 0.00016951560974121094
+splice_mutants                 : 0.008636713027954102
+
+gather
+sample-noise                   : 0.2079629898071289
+generate-point-mutations       : 0.05918288230895996
+head-deref                     : 0.08223295211791992
+energy                         : 2.0808637142181396
+metropolis-hastings-acceptance : 0.02432560920715332
+gather                         : 0.044023990631103516
+any-reachable-test             : 0.0065305233001708984
+parity-update                  : 0.01786661148071289
+fast                           : 0.0034074783325195312
+node-parity                    : 0.0006906986236572266
+reshape-accept                 : 0.00011229515075683594
+splice_mutants                 : 0.008862018585205078
+
+gather-summary
+setup       : 2.5229332447052
+node-parity : 0.07279229164123535
+
+retiming-energy
+setup           : 2.353163957595825
+mutation-energy : 16.595839500427246
+initial-energy  : 0.5484292507171631
+setdown         : 0.5430400371551514
+
+retiming-energy
+setup           : 1.3042283058166504
+mutation-energy : 2.5119576454162598
+initial-energy  : 1.1871774196624756
+setdown         : 11.37508773803711
+
+retiming-energy
+setup           : 2.457465887069702
+mutation-energy : 4.579146385192871
+initial-energy  : 2.1311159133911133
+setdown         : 18.973599672317505
+
+retiming-energy
+setup           : 4.893240690231323
+mutation-energy : 8.986969709396362
+initial-energy  : 4.248817682266235
+setdown         : 37.71730065345764
+
+retiming-energy
+setup           : 12.198022842407227
+mutation-energy : 22.383103132247925
+initial-energy  : 10.59228777885437
+setdown         : 95.31755232810974
+
+retiming-energy
+setup           : 24.34142541885376
+mutation-energy : 44.487191915512085
+initial-energy  : 21.25020933151245
+setdown         : 187.55372548103333
+

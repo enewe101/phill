@@ -39,10 +39,23 @@ class EmbeddingLayer(nn.Module):
 
 
     def link_energy(self, tokens_batch, heads_batch):
+        """
+        Generates the token-link energies between pairs of tokens, one from
+        tokens, one from heads, which are parallel tensors.  The tensors must
+        have the same shape.
+        """
+
+        if(tokens_batch.shape != heads_batch.shape):
+            raise ValueError(
+                "tokens_batch and heads_batch must have the same shape. Got",
+                tokens_batch.shape, "and", heads_batch.shape, "respectively."
+            )
+        last_dim = len(tokens_batch.shape)
+
         return_val = (torch.sum(
             self.U[tokens_batch] * self.V[heads_batch],
-            dim=2, keepdim=True
-        ) + self.Ubias[tokens_batch] + self.Vbias[heads_batch]).squeeze(2)
+            dim=last_dim, keepdim=True
+        ) + self.Ubias[tokens_batch] + self.Vbias[heads_batch]).squeeze(last_dim)
         return return_val
 
 
@@ -72,16 +85,16 @@ class EmbeddingLayer(nn.Module):
         return energy
 
 
-    def parse_link_energy(self, tokens_batch, parse_tree_batch):
-        """Calculate the link energy given the sentences defined in """
-        tokens_batch = tokens_batch
-        heads_batch = (
-            parse_tree_batch @ tokens_batch.unsqueeze(2)).squeeze(2)
-        return self.link_energy(tokens_batch, heads_batch)
-
-
-    def parse_energy(self, tokens_batch, parse_tree_batch):
-        return self.parse_link_energy(tokens_batch, parse_tree_batch).sum()
+    # Are these being used anymore?
+    #
+    #def parse_link_energy(self, tokens_batch, parse_tree_batch):
+    #    """Calculate the link energy given the sentences defined in """
+    #    tokens_batch = tokens_batch
+    #    heads_batch = (
+    #        parse_tree_batch @ tokens_batch.unsqueeze(2)).squeeze(2)
+    #    return self.link_energy(tokens_batch, heads_batch)
+    #def parse_energy(self, tokens_batch, parse_tree_batch):
+    #    return self.parse_link_energy(tokens_batch, parse_tree_batch).sum()
 
 
     def forward(self, tokens_batch, heads_batch):

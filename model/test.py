@@ -12,6 +12,8 @@ import torch
 import model as m
 
 
+TEST_DATA_PATH = os.path.join(os.path.dirname(__file__), "test-data")
+
 def seed_random(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -32,7 +34,7 @@ class DatasetTest(TestCase):
 
     def test_length_grouped_dataset(self):
         path = os.path.join(
-            os.path.dirname(__file__), "test-data/sentences.index")
+            TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
         dataset = m.LengthGroupedDataset(path)
         dataset.read()
 
@@ -51,7 +53,7 @@ class DatasetTest(TestCase):
 
     def test_padded_dataset(self):
         path = os.path.join(
-            os.path.dirname(__file__), "test-data/sentences.index")
+            TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
         padding = -1
         batch_size = 7
         dataset = m.PaddedDataset(path, padding, batch_size)
@@ -262,6 +264,160 @@ class Word2VecModelTest(TestCase):
         probs = probs / probs.sum(dim=1, keepdim=True)
 
         self.assertTrue(torch.allclose(counts, probs, atol=1e-2))
+
+
+class ParityTokenResamplerTest(TestCase):
+
+    def test_get_node_parity(self):
+        """
+        The function should accept a (*, sentence_length)-shaped batch of
+        heads_ptr vectors, containing trees, and it should return a 
+        (*, 2, sentence_length)-shaped batch of "node-parities".
+
+        The parity of a node i is whether it takes an even or odd number of
+        hops to get from i to ROOT.
+        """
+
+        # We'll use a batch of several sentences, and see that we can get
+        # correct node parities.
+        seed_random(2)
+        num_sentences = 50000
+        num_resampling_steps = 80
+        num_batches = 10
+
+        # We'll use a real sentence, with it's annotated parse structure
+        # as a starting point of testing the token resampling function.
+        sentence_path = os.path.join(
+            TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
+        dataset = m.LengthGroupedDataset(sentence_path)
+        dataset.read()
+        dictionary_path = os.path.join(
+            TEST_DATA_PATH, "ten-sentence-dataset/tokens.dict")
+        dictionary = m.Dictionary(dictionary_path)
+
+        sampler = m.sp.ParityTokenResampler(dataset.Px)
+        tokens_batch, heads_batch, relations_batch = dataset[3] # > 1 sentence
+        found_node_parities = sampler.get_node_parity(heads_batch)
+
+        # Verified by hand
+        expected_node_parities = torch.tensor([
+            [
+                False, False, False,  True, False, False,  True,  True,  True,
+                False, False, False,  True,  True,  True, False, False
+            ],[
+                False,  True, False, False,  True,  True,  True,  True,  True,
+                True, True, False, False, False, False,  True, False
+            ]
+        ])
+        torch.equal(found_node_parities, expected_node_parities)
+
+        # Now add another batching dimension.  The function should simply 
+        # treat the final dimension as the dimension indexed by tree structure
+        # and should treat all others simply as batching.  So, the expected
+        # result will simply be similarly reshaped.
+        rebatched_heads = heads_batch.unsqueeze(0).expand(5,-1,-1)
+        found_node_parities = sampler.get_node_parity(rebatched_heads)
+        expected_node_parities = expected_node_parities.unsqueeze(0).expand(
+            5,-1,-1)
+        
+
+    def test_parity_token_resampler(self):
+
+        seed_random(0)
+        num_sentences = 50000
+        num_resampling_steps = 40
+        num_batches = 10
+
+        # We'll use a real sentence, with it's annotated parse structure
+        # as a starting point of testing the token resampling function.
+        sentence_path = os.path.join(
+            TEST_DATA_PATH, "one-sentence-dataset/sentences.index")
+        dataset = m.LengthGroupedDataset(sentence_path)
+        dataset.read()
+        dictionary_path = os.path.join(
+            TEST_DATA_PATH, "one-sentence-dataset/tokens.dict")
+        dictionary = m.Dictionary(dictionary_path)
+        embedding = m.EmbeddingLayer(len(dictionary),4)
+
+        # We'll use just the first sentence in the dataset.
+        # times to resample many times in parallel.
+        tokens_batch, head_ptrs_batch, _ = dataset[0]
+        tokens_batch = tokens_batch[0].unsqueeze(0).expand(num_sentences,-1)
+        head_ptrs_batch = head_ptrs_batch[0].unsqueeze(0).expand(
+            num_sentences,-1)
+
+        # Continually resample the sentence.  Every resampling generates
+        # two mutated sentences, one with "even" tokens mutated and one with
+        # "odd" token mutated (based on parity of number of steps to get to 
+        # ROOT).  Keep re-submitting the even one for mutation so that it
+        # the probability of sampling tokens at the sentence head (odd)
+        # should approach model probability dictated by energies.
+        # Do this in multiple batches to generate many samples without
+        # clogging memory.
+        token_sampler = m.sp.ParityTokenResampler(dataset.Px)
+        watched_mutation_pos = 1
+        counts = torch.zeros(len(dictionary))
+        torch.set_printoptions(sci_mode=False)
+        for batch in range(num_batches):
+            print("batch", batch)
+            mutated_tokens = tokens_batch.clone().unsqueeze(1).expand(-1,2,-1)
+            for i in range(num_resampling_steps):
+                print(i)
+                mutated_tokens = token_sampler.sample_tokens_fast(
+                    mutated_tokens[:,1,:], head_ptrs_batch, embedding,
+                )
+            # Count how often token j is chosen as head by token i
+            for i in range(num_sentences):
+                counts[mutated_tokens[i,1,watched_mutation_pos]] += 1
+            print(counts)
+
+        # Get the probability of choosing any given token at
+        # watched_mutation_pos.
+        found_probs = counts / counts.sum()
+
+        # We will look at the rate of occurrence of mutations in specific
+        # locations.  Consider the token at watched_mutation_pos.  The
+        # distribution of mutants in that position should be proportional to
+        # the exp(sum of energies of its head and subordinate relations).
+        heads = tokens_batch[0].gather(dim=0, index=head_ptrs_batch[0])
+        pos_head_loc = heads[watched_mutation_pos].unsqueeze(0)
+        pos_head = tokens_batch[0, pos_head_loc]
+        pos_subs_loc = (
+            heads==tokens_batch[0, watched_mutation_pos]).nonzero().squeeze(1)
+        pos_subs = tokens_batch[0, pos_subs_loc]
+
+        # Calculate the total link energy to the head and subordinate of 
+        # the token in position 1, when each element of the vocabulary adopts
+        # that role.
+        with torch.no_grad():
+            sub_energy = (
+                embedding.V @ embedding.U[pos_subs].T
+                + embedding.Vbias + embedding.Ubias[pos_subs].T
+            ).sum(dim=1)
+            head_energy = (
+                embedding.U @ embedding.V[pos_head].T
+                + embedding.Ubias + embedding.Vbias[pos_head].T
+            ).squeeze(1)
+        mutation_energy = sub_energy + head_energy
+        weights = torch.exp(mutation_energy)
+        expected_probs = weights / weights.sum()
+
+        print("expected_probs, found_probs")
+        print_probs = torch.zeros(3, len(dictionary))
+        print_probs[0] = expected_probs
+        print_probs[1] = found_probs
+        print_probs[2] = dataset.Px
+        print(print_probs.T)
+        m.timer.write('parity-token-sampler-slow', 'retiming-energy')
+        pdb.set_trace()
+
+        self.assertTrue(torch.allclose(found_probs, expected_probs, atol=4e-3))
+
+
+
+
+
+
 
 
 class ContentionSamplerTest(TestCase):
@@ -619,7 +775,47 @@ class ParseSamplingMeasureTests(TestCase):
 class EnergyTest(TestCase):
 
 
-    def test_link_energy(self):
+    def test_link_energy_2(self):
+        """
+        Given a list of vectors and covectors, calculate the total energy,
+        which is the sum of all of the inner products of vectors and covectors,
+        including biases.
+        """
+        embedding = m.EmbeddingLayer(5,4)
+        tokens_batch = torch.tensor([
+            [
+                [2,0,3], 
+                [4,4,4]
+            ],[
+                [2,0,3],
+                [2,0,3]
+            ]
+        ])
+        heads_batch = torch.tensor([
+            [
+                [1,1,1], 
+                [2,2,2]
+            ],[
+                [1,1,1], 
+                [3,3,3]
+            ]
+        ])
+        num_sentences, num_mutations, num_tokens = tokens_batch.shape
+
+        # Test the function.
+        found_energy = embedding.link_energy(tokens_batch, heads_batch)
+
+        # Calculate the expected value
+        U = embedding.U[tokens_batch]
+        V = embedding.V[heads_batch]
+        ub = embedding.Ubias[tokens_batch]
+        vb = embedding.Vbias[heads_batch]
+
+        expected_energy = ((U*V).sum(dim=3, keepdim=True) + ub + vb).squeeze(3)
+        self.assertTrue(torch.equal(found_energy, expected_energy))
+
+
+    def test_link_energy_1(self):
         """
         Given a list of vectors and covectors, calculate the total energy,
         which is the sum of all of the inner products of vectors and covectors,
@@ -642,6 +838,20 @@ class EnergyTest(TestCase):
         expected_energy = ((U*V).sum(dim=2, keepdim=True) + ub + vb).squeeze(2)
 
         self.assertTrue(torch.equal(found_energy, expected_energy))
+
+
+    def test_link_energy_requires_same_shape(self):
+        """
+        The embedding.link_energy function should reject input where 
+        tokens_batch and heads_batch do not have the same shape.
+        """
+        embedding = m.EmbeddingLayer(5,4)
+        tokens_batch = torch.tensor([[2,0,3], [1,3,4]])
+        heads_batch = torch.tensor([[1,1,1]])
+        num_sentences, num_tokens = tokens_batch.shape
+
+        with self.assertRaises(ValueError):
+            embedding.link_energy(tokens_batch, heads_batch)
 
 
     def test_sentence_link_energy(self):
@@ -678,31 +888,31 @@ class EnergyTest(TestCase):
         self.assertTrue(torch.equal(found_energy, expected_energy))
 
 
-    def test_parse_link_energy(self):
-        embedding = m.EmbeddingLayer(5,4)
-        tokens_batch = torch.tensor([[0,1,2], [0,3,4]])
-        num_sentences, num_tokens = tokens_batch.shape
-        parse_tree_batch = torch.tensor([
-            [[1,0,0],
-            [0,0,1],
-            [1,0,0]],
+    #def test_parse_link_energy(self):
+    #    embedding = m.EmbeddingLayer(5,4)
+    #    tokens_batch = torch.tensor([[0,1,2], [0,3,4]])
+    #    num_sentences, num_tokens = tokens_batch.shape
+    #    parse_tree_batch = torch.tensor([
+    #        [[1,0,0],
+    #        [0,0,1],
+    #        [1,0,0]],
 
-            [[1,0,0],
-            [1,0,0],
-            [0,1,0]]
-        ])
+    #        [[1,0,0],
+    #        [1,0,0],
+    #        [0,1,0]]
+    #    ])
 
-        # Test the function.
-        found_energy = embedding.parse_link_energy(tokens_batch,parse_tree_batch)
+    #    # Test the function.
+    #    found_energy = embedding.parse_link_energy(tokens_batch,parse_tree_batch)
 
-        # Calculate the expected value.
-        heads_batch = (parse_tree_batch @ tokens_batch.unsqueeze(2)).squeeze(2)
-        U = embedding.U[tokens_batch]
-        V = embedding.V[heads_batch]
-        ub = embedding.Ubias[tokens_batch]
-        vb = embedding.Vbias[heads_batch]
-        expected_energy = ((U*V).sum(dim=2, keepdim=True) + ub + vb).squeeze(2)
-        self.assertTrue(torch.equal(found_energy, expected_energy))
+    #    # Calculate the expected value.
+    #    heads_batch = (parse_tree_batch @ tokens_batch.unsqueeze(2)).squeeze(2)
+    #    U = embedding.U[tokens_batch]
+    #    V = embedding.V[heads_batch]
+    #    ub = embedding.Ubias[tokens_batch]
+    #    vb = embedding.Vbias[heads_batch]
+    #    expected_energy = ((U*V).sum(dim=2, keepdim=True) + ub + vb).squeeze(2)
+    #    self.assertTrue(torch.equal(found_energy, expected_energy))
 
 
 
