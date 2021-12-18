@@ -174,30 +174,39 @@ class ParityTokenResampler:
     def sample_tokens(self, tokens_batch, head_ptrs, embedding):
         num_sentences, num_tokens = tokens_batch.shape
 
+        # Get the mask, and make masked values zero (heads needs this to not
+        # throw error when used as an index to torch.gather.
+        mask = (tokens_batch == -1)
+        tokens_batch[mask] = 0
+        head_ptrs[mask] = 0
+
         # Randomly sample a bunch of nodes from the unigram distribution
         mutants_batch = self.unigram_sampler.sample(tokens_batch.shape)
+        mutants_batch[mask] = 0 
 
         # Generate two new token lists for each sentence based on mutants_batch.
         # Generate a new token list which contains, at position i, the
         # dereferenced head of i if its head had mutated.
         mutant_heads = mutants_batch.gather(dim=1, index=head_ptrs)
         heads = tokens_batch.gather(dim=1, index=head_ptrs)
-        
+
         # Calculate the total energy of sentences in original and mutated 
         # version.
         with torch.no_grad():
             mutant_head_energy = embedding.link_energy(
-                tokens_batch, mutant_heads)
+                tokens_batch, mutant_heads, mask)
             mutant_sub_energy = embedding.link_energy(
-                mutants_batch, heads)
+                mutants_batch, heads, mask)
             normal_energy = embedding.link_energy(
-                tokens_batch, heads)
+                tokens_batch, heads, mask)
 
         # Calculate the energy for each possible point mutation.
         # At each position i, take the energy from either 
-        # (a) mutan_head_energy, (b) mutant_sub_energy, or (c) normal energy,
-        # depending on whether that point i is (a) the point mutation,
-        # (b) a sub of the point mutation, or (c) neither
+        # (a) mutant_head_energy, (b) mutant_sub_energy, or (c) normal_energy,
+        # depending on whether that point i (a) has the point mutation as its 
+        # head, (b) is the point mutation (and from the perspective of
+        # calculating energy, it is a mutated subordinate of an unmutated head)
+        # (c) is neither the point mutation nor a subordinate of it.
         sub_mutation = torch.eye(num_tokens, dtype=torch.bool)
         sub_mutation = sub_mutation.unsqueeze(0).expand(num_sentences, -1, -1)
         head_mutation = sub_mutation.gather(
@@ -260,6 +269,23 @@ class ParityTokenResampler:
         tokens_mutated[:,1,:] = torch.where(
             do_accept.logical_and(node_parity), mutants_batch, tokens_batch,
         )
+        #
+        # So sample_tokens seems to be adapted to take masked input.
+        # Right now, the output, tokens_mutated, has zeros at mask.
+        # We could have it put out -1s, however, I think that we should adopt
+        # the convention that masked values be zero because it can be interpreted
+        # as an index without problems, and we always want to assert the mask
+        # explicitly in any calculations that need to handle masked values.
+        # This would mean adjusting PaddedDataset to pad with zeros but also
+        # provide a mask.  A slight change to w2v will be needed, since it 
+        # should accept a mask as input rather than inferring it from -1 padding.
+        #
+        # Test node parity more:
+        #   Does it always turn up padding as odd?
+        #   Does it give correct results for a wider variety of trees?
+        #                                           (only tested on two so far)
+        #
+        pdb.set_trace()
 
         return tokens_mutated
 

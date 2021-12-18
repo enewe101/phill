@@ -323,12 +323,13 @@ class ParityTokenResamplerTest(TestCase):
         num_sentences = 50000
         num_resampling_steps = 40
         num_batches = 1
+        padding = -1
 
         # We'll use a real sentence, with it's annotated parse structure
         # as a starting point of testing the token resampling function.
         sentence_path = os.path.join(
             TEST_DATA_PATH, "one-sentence-dataset/sentences.index")
-        dataset = m.LengthGroupedDataset(sentence_path)
+        dataset = m.PaddedDataset(sentence_path, padding)
         dataset.read()
         dictionary_path = os.path.join(
             TEST_DATA_PATH, "one-sentence-dataset/tokens.dict")
@@ -338,9 +339,18 @@ class ParityTokenResamplerTest(TestCase):
         # We'll use just the first sentence in the dataset.
         # times to resample many times in parallel.
         tokens_batch, head_ptrs_batch, _ = dataset[0]
+        _, num_tokens = tokens_batch.shape
         tokens_batch = tokens_batch[0].unsqueeze(0).expand(num_sentences,-1)
         head_ptrs_batch = head_ptrs_batch[0].unsqueeze(0).expand(
             num_sentences,-1)
+
+        # There's no padding because this is a one-sentence dataset.  Add some.
+        new_tokens_batch = torch.full((num_sentences, num_tokens + 5), padding)
+        new_head_ptrs_batch = torch.full(
+            (num_sentences, num_tokens + 5), padding)
+        new_tokens_batch[:, :num_tokens] = tokens_batch
+        new_head_ptrs_batch[:, :num_tokens] = head_ptrs_batch
+        tokens_batch, head_ptrs_batch = new_tokens_batch, new_head_ptrs_batch
 
         # Continually resample the sentence.  Every resampling generates
         # two mutated sentences, one with "even" tokens mutated and one with
@@ -361,8 +371,7 @@ class ParityTokenResamplerTest(TestCase):
                 sys.stdout.write(str(i))
                 sys.stdout.flush()
                 mutated_tokens = token_sampler.sample_tokens(
-                    mutated_tokens[:,1,:], head_ptrs_batch, embedding,
-                )
+                    mutated_tokens[:,1,:], head_ptrs_batch, embedding)
                 sys.stdout.write("\b"*len(str(i)))
             # Count how often token j is chosen as head by token i
             for i in range(num_sentences):
@@ -786,6 +795,36 @@ class EnergyTest(TestCase):
         vb = embedding.Vbias[heads_batch]
 
         expected_energy = ((U*V).sum(dim=2, keepdim=True) + ub + vb).squeeze(2)
+
+        self.assertTrue(torch.equal(found_energy, expected_energy))
+
+
+    def test_link_energy_mask(self):
+        """
+        Given a list of vectors and covectors, calculate the total energy,
+        which is the sum of all of the inner products of vectors and covectors,
+        including biases.
+        """
+        embedding = m.EmbeddingLayer(5,4)
+        tokens_batch = torch.tensor([[2,0,3], [1,3,4]])
+        heads_batch = torch.tensor([[1,1,1], [2,2,2]])
+        num_sentences, num_tokens = tokens_batch.shape
+        mask = torch.tensor([[0,0,1],[0,0,1]], dtype=torch.bool)
+
+        # Test the function.
+        found_energy = embedding.link_energy(tokens_batch, heads_batch, mask)
+
+        # Calculate the expected value
+        # Set masked values to zero
+        U = embedding.U[tokens_batch]
+        V = embedding.V[heads_batch]
+        ub = embedding.Ubias[tokens_batch]
+        vb = embedding.Vbias[heads_batch]
+
+        # Calculate energy, then set energy for masked values to zero
+        expected_energy = (
+            (U*V).sum(dim=2, keepdim=True) + ub + vb).squeeze(2)
+        expected_energy[:,2] = 0
 
         self.assertTrue(torch.equal(found_energy, expected_energy))
 

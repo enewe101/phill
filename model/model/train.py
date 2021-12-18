@@ -76,6 +76,7 @@ def train_w2v(data_path=DATA_DIR):
             mask = (tokens_batch == -1)
             mask[:,0] = True
 
+            pdb.set_trace()
             loss = -torch.where(
                 mask,
                 torch.tensor([[0]], dtype=torch.float),

@@ -38,7 +38,7 @@ class EmbeddingLayer(nn.Module):
         return self.link_energy(tokens_batch, heads_batch).sum()
 
 
-    def link_energy(self, tokens_batch, heads_batch):
+    def link_energy(self, tokens_batch, heads_batch, mask=False):
         """
         Generates the token-link energies between pairs of tokens, one from
         tokens, one from heads, which are parallel tensors.  The tensors must
@@ -52,11 +52,13 @@ class EmbeddingLayer(nn.Module):
             )
         last_dim = len(tokens_batch.shape)
 
-        return_val = (torch.sum(
+        energies = (torch.sum(
             self.U[tokens_batch] * self.V[heads_batch],
             dim=last_dim, keepdim=True
         ) + self.Ubias[tokens_batch] + self.Vbias[heads_batch]).squeeze(last_dim)
-        return return_val
+
+        energies[mask] = 0
+        return energies
 
 
     def sentence_link_energy(self, tokens_batch, mask=True):
