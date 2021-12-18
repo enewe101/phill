@@ -1,9 +1,10 @@
 import os
+import sys
 import pdb
 import time
 import random
 import itertools as it
-from unittest import TestCase, main
+from unittest import TestCase, main, skip
 from collections import Counter
 
 import numpy as np
@@ -143,7 +144,6 @@ class Word2VecModelTest(TestCase):
         return expected_probs
 
 
-
     def test_sample_parses(self):
 
         seed_random(0)
@@ -278,15 +278,7 @@ class ParityTokenResamplerTest(TestCase):
         hops to get from i to ROOT.
         """
 
-        # We'll use a batch of several sentences, and see that we can get
-        # correct node parities.
-        seed_random(2)
-        num_sentences = 50000
-        num_resampling_steps = 80
-        num_batches = 10
-
-        # We'll use a real sentence, with it's annotated parse structure
-        # as a starting point of testing the token resampling function.
+        # We'll use a couple real sentences with annotated parse structure
         sentence_path = os.path.join(
             TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
         dataset = m.LengthGroupedDataset(sentence_path)
@@ -295,11 +287,14 @@ class ParityTokenResamplerTest(TestCase):
             TEST_DATA_PATH, "ten-sentence-dataset/tokens.dict")
         dictionary = m.Dictionary(dictionary_path)
 
+        # Build the sampler, and read the batch from the dataset
         sampler = m.sp.ParityTokenResampler(dataset.Px)
         tokens_batch, heads_batch, relations_batch = dataset[3] # > 1 sentence
+
+        # Test the target function
         found_node_parities = sampler.get_node_parity(heads_batch)
 
-        # Verified by hand
+        # These were verified by hand.
         expected_node_parities = torch.tensor([
             [
                 False, False, False,  True, False, False,  True,  True,  True,
@@ -321,12 +316,13 @@ class ParityTokenResamplerTest(TestCase):
             5,-1,-1)
         
 
+    #@skip("Long test")
     def test_parity_token_resampler(self):
 
         seed_random(0)
         num_sentences = 50000
         num_resampling_steps = 40
-        num_batches = 10
+        num_batches = 1
 
         # We'll use a real sentence, with it's annotated parse structure
         # as a starting point of testing the token resampling function.
@@ -359,17 +355,19 @@ class ParityTokenResamplerTest(TestCase):
         counts = torch.zeros(len(dictionary))
         torch.set_printoptions(sci_mode=False)
         for batch in range(num_batches):
-            print("batch", batch)
+            sys.stdout.write(str(batch)+":")
             mutated_tokens = tokens_batch.clone().unsqueeze(1).expand(-1,2,-1)
             for i in range(num_resampling_steps):
-                print(i)
-                mutated_tokens = token_sampler.sample_tokens_fast(
+                sys.stdout.write(str(i))
+                sys.stdout.flush()
+                mutated_tokens = token_sampler.sample_tokens(
                     mutated_tokens[:,1,:], head_ptrs_batch, embedding,
                 )
+                sys.stdout.write("\b"*len(str(i)))
             # Count how often token j is chosen as head by token i
             for i in range(num_sentences):
                 counts[mutated_tokens[i,1,watched_mutation_pos]] += 1
-            print(counts)
+            sys.stdout.write("\b"*(len(str(batch))+1))
 
         # Get the probability of choosing any given token at
         # watched_mutation_pos.
@@ -408,16 +406,7 @@ class ParityTokenResamplerTest(TestCase):
         print_probs[1] = found_probs
         print_probs[2] = dataset.Px
         print(print_probs.T)
-        m.timer.write('parity-token-sampler-slow', 'retiming-energy')
-        pdb.set_trace()
-
         self.assertTrue(torch.allclose(found_probs, expected_probs, atol=4e-3))
-
-
-
-
-
-
 
 
 class ContentionSamplerTest(TestCase):
@@ -464,41 +453,88 @@ class ContentionSamplerTest(TestCase):
         self.assertTrue(torch.all(found_multiple_root == expected_multiple_root))
 
 
-class TreeCounterTest(TestCase):
+class QuadTreeCounterTest(TestCase):
+    NUM_FOUR_TREES = 64
+    def test_tree_coding(self):
+        # NUM_FOUR_TREES number of unique tree codes were generated.
+        counter = QuadTreeCounter()
+        self.assertTrue(len(counter.trees) == self.NUM_FOUR_TREES)
+        self.assertTrue(len(set(counter.trees)) == self.NUM_FOUR_TREES)
 
-    def test_sub_counter_cover(self):
-        tree_counter = TreeCounter()
+    def test_tree_allocation(self):
+        counter = QuadTreeCounter()
 
-        # The counter has sub counters.  Every tree_code (key) that exists
-        # in the main counter should occur in one, and only one, of the 
-        # sub counters.  Ensure sub counters neither miss nor double-count keys.
-        key_occurrences = Counter()
-        for sub_counter in tree_counter.counters:
-            key_occurrences.update(sub_counter.keys())
-        found_codes_missing_or_double_counted = False
-        for tree_code in tree_counter.tree_counter.keys():
-            if key_occurrences[tree_code] != 1:
-                found_codes_missing_or_double_counted = True
-        self.assertTrue(not found_codes_missing_or_double_counted)
+        # Each of the 64 indices into self.trees should be in exactly one tree
+        # shape list (self.el_trees, ..j_trees, ..h_trees, ..m_trees).
+        index_sightings = Counter()
+        for indices in counter.tree_shape_indices:
+            index_sightings.update(indices)
 
-        # Ensure that there were the correct number of codes (above could
-        # pass with all counters having no keys).
-        self.assertTrue(len(tree_counter) == 64)
+        # All 64 trees are assigned, all of which were assigned only once:
+        self.assertTrue(len(index_sightings)==self.NUM_FOUR_TREES)
+        self.assertTrue(all([val==1 for val in index_sightings.values()]))
+        self.assertTrue(
+            sorted(index_sightings.keys()) == list(range(self.NUM_FOUR_TREES)))
+
+    def test_counter_probs(self):
+        counter = QuadTreeCounter()
+
+        # Here we will assuming counter.trees is correct.
+        # Fill a tree counter with arbitrary values for each tree, and 
+        # Maintain an external counter using counter.trees as an index.
+        expected_counts = Counter()
+        for i, tree in enumerate(counter.trees):
+            expected_counts[tree] += i
+            counter.add(tree, i)
+
+        # Test the target function.
+        found_probs = counter.get_probs()
+
+        # Calculate the probabilities that we expect by looking in our external
+        # counter.  These probs were also verified manually.
+        expected_probs = torch.zeros(self.NUM_FOUR_TREES)
+        total_trees = sum(expected_counts.values())
+        for i, tree in enumerate(counter.trees):
+            expected_probs[i] = expected_counts[tree] / total_trees
+
+        self.assertTrue(torch.allclose(found_probs, expected_probs))
 
 
+class QuadTreeCounter:
 
-class TreeCounter:
+    # To compare counts and probabilities for trees on four nodes we need to
+    # assign a unique, orderable key to each tree.  To do this, we generate all
+    # possible trees on four nodes, and assign each the tuple (a,b,c,d) in
+    # which, as usual, the ith position contains a pointer to the index of the
+    # ith nodes head.  Note that there are only four possible shapes for trees
+    # of four nodes: (I name them according to the letter they look like):
+    #
+    #    el:  |    j:  |    h: |    m:  |
+    #         |       | |      |       |||
+    #         |         |     | |
+    #         |  
+    #
+    # Trees of the same shape may differ by permutation of the node ids.  So,
+    # generate all trees by looking at all permutations on each shape.
+    # Multiple permutations can generate the same tree, but the unique key
+    # assignment prevents duplication.
+
+    EL = 0
+    J = 1
+    H = 2
+    M = 3
 
     def __init__(self):
         self.tree_counter = None
         self.trees = None
-        self.tree_types = None
+        self.seen_trees = None
+        self.tree_shape_indices = None
         self.el_trees = None
         self.j_trees = None
         self.h_trees = None
         self.m_trees = None
-
-        self.build_counters()
+        self.tree_structures = None
+        self.setup()
 
     def get_probs(self):
         """
@@ -515,133 +551,92 @@ class TreeCounter:
             )
         return found_probs
 
-
     def __len__(self):
+        """Number of trees (always 64)"""
         return len(self.tree_counter)
 
-
-    def keys(self):
-        return self.tree_counter.keys()
-
-
-    def add(self, tree_code):
-        """
-        Increment the count for tree_code in tree_counter and in whichever
-        type-specific counter (e.g. el_counter, j_counter...) it belongs to.
-        Throw an error if the tree_code isn't in any of the specific counters.
-        """
-
+    def add(self, tree_code, amount=1):
+        """ Increment count for tree_code by amount.  """
         # Update main counter.
-        self.tree_counter[tree_code] += 1
+        self.tree_counter[tree_code] += amount
 
+    def build_tree(self, perm, tree_type, tree_number):
 
-    def build_counters(self):
+        # Get structure and index accumulator for this tree type.
+        heads = self.tree_structures[tree_type]
+        tree_indices = self.tree_shape_indices[tree_type]
 
-        # Construct a counter for each possible rooted, labelled tree
-        # on four nodes.  An easy way to find all trees is to encode
-        # a tree as a tuple where position i of the tuple contains the 
-        # the label of the head chosen by the ith node.  This provides
-        # a unique encoding for each tree so we can easily avoid duplication.
+        # Build the tree based on the permutation and tree structure given.
+        tree_code = [0] * 5
+        tree_code[perm[0]] = heads[0]
+        tree_code[perm[1]] = perm[heads[1]]
+        tree_code[perm[2]] = perm[heads[2]]
+        tree_code[perm[3]] = perm[heads[3]]
+        tree_code = tuple(tree_code)
 
-        # Notice that there are four un-labelled tree structures, which we 
-        # name based on resemblance to letters:
-        #    el:  |    j:  |    h: |    m:  |
-        #         |       | |      |       |||
-        #         |         |     | |
-        #         |  
-        #
-        # By checking each permutation of labels over each structure,
-        # and encoding the tree in a tuple, we can find all labelled trees.
-        # Not all label permutations over a given unlabelled structure yield
-        # unique trees, but our encoding is unique, so this duplication is 
-        # easily eliminated.
-        seen_trees = set()
+        # Add the tree if its new.  
+        added_tree = 0
+        if tree_code not in self.seen_trees:
+            self.seen_trees.add(tree_code)
+            self.trees.append(tree_code)
+            tree_indices.append(tree_number)
+            added_tree = 1
 
+        # Return 1 if a new tree was made, 0 if not.
+        return added_tree
+
+    def setup(self):
+
+        # Head-pointer-encoded structure of four shapes of four-trees
+        self.tree_structures = [
+            [0,0,1,2], # el_heads
+            [0,0,0,2], # j_heads
+            [0,0,1,1], # h_heads 
+            [0,0,0,0]  # m_heads
+        ]
+
+        # Initialize some accumulators for trees and tree indices.
+        self.seen_trees = set()
         self.trees = []
         self.el_trees = []
         self.j_trees = []
         self.h_trees = []
         self.m_trees = []
-        i = 0
+        self.tree_shape_indices = (
+            self.el_trees, self.j_trees, self.h_trees, self.m_trees)
+
+        # Apply each permutation of four nodes to each tree structure.  Generate
+        # the code for that tree, and add it (provided it is not a duplicate).
+        # Every tree is assigned a unique number, which is the index of 
+        # that tree code in self.trees.
+        tree_number = 0
         for perm in it.permutations([1,2,3,4]):
-            # Apply each permutation to each unlabelled structure, and then
-            # generate the unique encoding for that tree, and add it to a set.
-            el_tree = [0] * 5
-            el_tree[perm[0]] = 0
-            el_tree[perm[1]] = perm[0]
-            el_tree[perm[2]] = perm[1]
-            el_tree[perm[3]] = perm[2]
-            el_tree = tuple(el_tree)
-            if el_tree not in seen_trees:
-                seen_trees.add(el_tree)
-                self.trees.append(el_tree)
-                self.el_trees.append(i)
-                i += 1
-
-            j_tree = [0] * 5
-            j_tree[perm[0]] = 0
-            j_tree[perm[1]] = perm[0]
-            j_tree[perm[2]] = perm[0]
-            j_tree[perm[3]] = perm[2]
-            j_tree = tuple(j_tree)
-            if j_tree not in seen_trees:
-                seen_trees.add(j_tree)
-                self.trees.append(j_tree)
-                self.j_trees.append(i)
-                i += 1
-
-            h_tree = [0] * 5
-            h_tree[perm[0]] = 0
-            h_tree[perm[1]] = perm[0]
-            h_tree[perm[2]] = perm[1]
-            h_tree[perm[3]] = perm[1]
-            h_tree = tuple(h_tree)
-            if h_tree not in seen_trees:
-                seen_trees.add(h_tree)
-                self.trees.append(h_tree)
-                self.h_trees.append(i)
-                i += 1
-
-
-            m_tree = [0] * 5
-            m_tree[perm[0]] = 0
-            m_tree[perm[1]] = perm[0]
-            m_tree[perm[2]] = perm[0]
-            m_tree[perm[3]] = perm[0]
-            m_tree = tuple(m_tree)
-            if m_tree not in seen_trees:
-                seen_trees.add(m_tree)
-                self.trees.append(m_tree)
-                self.m_trees.append(i)
-                i += 1
+            for tree_type in [self.EL, self.J, self.H, self.M]:
+                tree_number += self.build_tree(perm, tree_type, tree_number)
 
         # Make a counter indexed by the tuple encoding each tree.
         self.tree_counter = {tree:0 for tree in self.trees}
-        self.tree_types = (
-            self.el_trees, self.j_trees, self.h_trees, self.m_trees)
-
 
 
 class ParseSamplingMeasureTests(TestCase):
 
     def test_contention_uniform(self):
         sampler = m.sp.Contention()
-        self.sample_parses_uniform_test(sampler)
+        self.uniform_test(sampler)
 
-    def test_cpwr2(self):
+    def test_cpwr2_uniform(self):
         sampler = m.sp.CycleProofRerooting2()
-        self.sample_parses_uniform_test(sampler)
+        self.uniform_test(sampler)
 
     def test_cycle_proof_walk_with_rerooting_uniform(self):
         sampler = m.sp.CycleProofRerooting()
-        self.sample_parses_uniform_test(sampler)
+        self.uniform_test(sampler)
 
     def test_root_reset_uniform(self):
         sampler = m.sp.RootReset()
-        self.sample_parses_uniform_test(sampler)
+        self.uniform_test(sampler)
 
-
-    def sample_parses_uniform_test(self, sampler):
+    def uniform_test(self, sampler):
 
         seed_random(0)
 
@@ -662,7 +657,7 @@ class ParseSamplingMeasureTests(TestCase):
 
         # First we will make a set of all possible rooted trees constructed
         # with four labelled nodes.  
-        tree_counter = TreeCounter()
+        tree_counter = QuadTreeCounter()
 
         # Count the occurrences of each tree generated by the model
         trees = sampler.sample(tokens_batch, embedding)
@@ -675,14 +670,12 @@ class ParseSamplingMeasureTests(TestCase):
         ])
 
         # The frequencies should be uniform and all close to 1 / num_trees:
-        pdb.set_trace()
         expected_frequency = torch.tensor([1/len(tree_counter)])
         self.assertTrue(torch.allclose(
             frequencies,
             expected_frequency,
             atol=0.0035
         ))
-
 
     def test_contention_nonuniform(self):
         sampler = m.sp.Contention()
@@ -696,7 +689,7 @@ class ParseSamplingMeasureTests(TestCase):
         sampler = m.sp.CycleProofRerooting2()
         self.nonuniform_test(sampler)
 
-    def test_root_reset_uniform(self):
+    def test_root_reset_nonuniform(self):
         sampler = m.sp.RootReset()
         self.nonuniform_test(sampler)
 
@@ -712,8 +705,6 @@ class ParseSamplingMeasureTests(TestCase):
         expected_probs = expected_probs / expected_probs.sum()
 
         return expected_probs
-
-
 
 
     def nonuniform_test(self, sampler):
@@ -732,7 +723,7 @@ class ParseSamplingMeasureTests(TestCase):
 
         # First we will make a set of all possible rooted trees constructed
         # with four labelled nodes.  
-        tree_counter = TreeCounter()
+        tree_counter = QuadTreeCounter()
 
         # Generate trees from the model, and count them.
         start = time.time()
@@ -761,10 +752,9 @@ class ParseSamplingMeasureTests(TestCase):
         expected_m_probs = expected_probs[torch.tensor(tree_counter.m_trees)]
 
         # The frequencies should be uniform and all close to 1 / num_trees:
-        torch.set_printoptions(sci_mode=False)
-        print("Elapsed:", elapsed)
-        print((found_probs - expected_probs).abs().mean())
-        pdb.set_trace()
+        #torch.set_printoptions(sci_mode=False)
+        #print("Elapsed:", elapsed)
+        #print((found_probs - expected_probs).abs().mean())
         self.assertTrue(torch.allclose(
             found_probs,
             expected_probs,
@@ -775,11 +765,38 @@ class ParseSamplingMeasureTests(TestCase):
 class EnergyTest(TestCase):
 
 
-    def test_link_energy_2(self):
+    def test_link_energy_1(self):
         """
         Given a list of vectors and covectors, calculate the total energy,
         which is the sum of all of the inner products of vectors and covectors,
         including biases.
+        """
+        embedding = m.EmbeddingLayer(5,4)
+        tokens_batch = torch.tensor([[2,0,3], [1,3,4]])
+        heads_batch = torch.tensor([[1,1,1], [2,2,2]])
+        num_sentences, num_tokens = tokens_batch.shape
+
+        # Test the function.
+        found_energy = embedding.link_energy(tokens_batch, heads_batch)
+
+        # Calculate the expected value
+        U = embedding.U[tokens_batch]
+        V = embedding.V[heads_batch]
+        ub = embedding.Ubias[tokens_batch]
+        vb = embedding.Vbias[heads_batch]
+
+        expected_energy = ((U*V).sum(dim=2, keepdim=True) + ub + vb).squeeze(2)
+
+        self.assertTrue(torch.equal(found_energy, expected_energy))
+
+
+    def test_link_energy_nested_batches(self):
+        """
+        Similar to test_link_energy, but here we are checking whether 
+        the function can handle nesting of batches.  It should just consider
+        tokens_batch and heads_batch to be parallel tensors containing
+        indices for covectors and vectors, and should compute pairwise energies,
+        returning a tensor of energies having the same shape as both inputs.
         """
         embedding = m.EmbeddingLayer(5,4)
         tokens_batch = torch.tensor([
@@ -815,31 +832,6 @@ class EnergyTest(TestCase):
         self.assertTrue(torch.equal(found_energy, expected_energy))
 
 
-    def test_link_energy_1(self):
-        """
-        Given a list of vectors and covectors, calculate the total energy,
-        which is the sum of all of the inner products of vectors and covectors,
-        including biases.
-        """
-        embedding = m.EmbeddingLayer(5,4)
-        tokens_batch = torch.tensor([[2,0,3], [1,3,4]])
-        heads_batch = torch.tensor([[1,1,1], [2,2,2]])
-        num_sentences, num_tokens = tokens_batch.shape
-
-        # Test the function.
-        found_energy = embedding.link_energy(tokens_batch, heads_batch)
-
-        # Calculate the expected value
-        U = embedding.U[tokens_batch]
-        V = embedding.V[heads_batch]
-        ub = embedding.Ubias[tokens_batch]
-        vb = embedding.Vbias[heads_batch]
-
-        expected_energy = ((U*V).sum(dim=2, keepdim=True) + ub + vb).squeeze(2)
-
-        self.assertTrue(torch.equal(found_energy, expected_energy))
-
-
     def test_link_energy_requires_same_shape(self):
         """
         The embedding.link_energy function should reject input where 
@@ -865,7 +857,7 @@ class EnergyTest(TestCase):
 
         # What were we expecting?  It should be the matrix product of the 
         # vectors and covectors plus the biases.  The covectors and covector-
-        # biases need to be transposed.
+        # biases need to be transposed so that we can use matrix multiplication.
         U = embedding.U[tokens_batch]
         V_t = embedding.V[tokens_batch].transpose(1,2)
         ub = embedding.Ubias[tokens_batch]
@@ -887,32 +879,6 @@ class EnergyTest(TestCase):
 
         self.assertTrue(torch.equal(found_energy, expected_energy))
 
-
-    #def test_parse_link_energy(self):
-    #    embedding = m.EmbeddingLayer(5,4)
-    #    tokens_batch = torch.tensor([[0,1,2], [0,3,4]])
-    #    num_sentences, num_tokens = tokens_batch.shape
-    #    parse_tree_batch = torch.tensor([
-    #        [[1,0,0],
-    #        [0,0,1],
-    #        [1,0,0]],
-
-    #        [[1,0,0],
-    #        [1,0,0],
-    #        [0,1,0]]
-    #    ])
-
-    #    # Test the function.
-    #    found_energy = embedding.parse_link_energy(tokens_batch,parse_tree_batch)
-
-    #    # Calculate the expected value.
-    #    heads_batch = (parse_tree_batch @ tokens_batch.unsqueeze(2)).squeeze(2)
-    #    U = embedding.U[tokens_batch]
-    #    V = embedding.V[heads_batch]
-    #    ub = embedding.Ubias[tokens_batch]
-    #    vb = embedding.Vbias[heads_batch]
-    #    expected_energy = ((U*V).sum(dim=2, keepdim=True) + ub + vb).squeeze(2)
-    #    self.assertTrue(torch.equal(found_energy, expected_energy))
 
 
 

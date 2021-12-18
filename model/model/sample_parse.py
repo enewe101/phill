@@ -61,7 +61,6 @@ class Contention():
             heads_sample = head_selector.sample()
             heads = torch.where(contenders, heads_sample, heads)
 
-        print(num_sentences, "sentences parsed in",i,"turns.")
         return heads
 
 
@@ -172,84 +171,7 @@ class ParityTokenResampler:
         return node_parity
 
 
-    # TODO: There is probably a more efficient way to do this.
-    # Rather than recalculate the full sentence energy for every point-mutation
-    # we could calculate the link energy for every <mut|orig> and every 
-    # <orig|mut>.  Then the energy of every point mutation can be calculated
-    # as a sum across the original sentences link energies, and the 
-    # mutated ones.  This reduces the number of sentence link energies from
-    # n+1 to 3, at the cost of some sums and lookups.  Should be faster and 
-    # preserve gram.
     def sample_tokens(self, tokens_batch, head_ptrs, embedding):
-        m.timer.start()
-        num_sentences, num_tokens = tokens_batch.shape
-
-        # Randomly sample a bunch of nodes from the unigram distribution
-        # But preserve the node at position 0 to be ther ROOT token
-        # CONSIDER: should we prevent noise_batch from sampling ROOT?
-        noise_batch = self.unigram_sampler.sample(tokens_batch.shape)
-        noise_batch[:,0] = 0
-
-        # Generate a new num_tokens new versions of each sentence wherein
-        # new version i has token i replaced with token i of the noise batch.
-        substitution_pattern = torch.eye(
-            num_tokens, dtype=torch.bool).unsqueeze(0)
-        single_token_mutations = torch.where(
-            substitution_pattern,
-            noise_batch.unsqueeze(1),
-            tokens_batch.unsqueeze(1)
-        )
-
-        # De-reference the head tokens, both for the original sentence...
-        heads = tokens_batch.gather(dim=1, index=head_ptrs)
-        # ...and for the mutated sentences.
-        head_ptrs_index = head_ptrs.unsqueeze(1).expand(-1,num_tokens,-1)
-        head_mutations = single_token_mutations.gather(
-            dim=2, index=head_ptrs_index)
-
-        # Calculate the total energy of sentences in original and mutated 
-        # version.
-        with torch.no_grad():
-            m.timer.log("setup")
-            mutation_energy = embedding.link_energy(
-                single_token_mutations, head_mutations).sum(dim=2)
-            m.timer.log('mutation-energy')
-            initial_energy = embedding.link_energy(
-                tokens_batch, heads).unsqueeze(1).expand(
-                -1,num_tokens,-1).sum(dim=2)
-            m.timer.log('initial-energy')
-
-        # Calculate the metropolis-hastings acceptance score, then either
-        # accept or reject each mutation.
-        proposal_weights = self.Px[heads] / self.Px[noise_batch]
-        accept_score = proposal_weights * torch.exp(
-            mutation_energy - initial_energy)
-        reject_score = torch.rand(tokens_batch.shape)
-        do_accept = accept_score > reject_score
-
-        # Rather than return each individually mutated sentence, we collapse
-        # all mutations into two sentences: one taking all mutations in 
-        # tokens that are an even number of steps from the root, and one
-        # taking all mutations in tokens that are an odd number of steps from
-        # the root.  This allows us to consider model expectations along all
-        # visible.
-        node_parity = self.get_node_parity(head_ptrs)
-        do_accept = do_accept
-        tokens_mutated = torch.empty(
-            (num_sentences, 2, num_tokens), dtype=torch.int64)
-        tokens_mutated[:,0,:] = torch.where(
-            do_accept.logical_and(node_parity==0), noise_batch, tokens_batch,
-        )
-        tokens_mutated[:,1,:] = torch.where(
-            do_accept.logical_and(node_parity), noise_batch, tokens_batch,
-        )
-        m.timer.log('setdown')
-
-        return tokens_mutated
-
-
-    def sample_tokens_fast(self, tokens_batch, head_ptrs, embedding):
-        m.timer.start()
         num_sentences, num_tokens = tokens_batch.shape
 
         # Randomly sample a bunch of nodes from the unigram distribution
@@ -264,15 +186,12 @@ class ParityTokenResampler:
         # Calculate the total energy of sentences in original and mutated 
         # version.
         with torch.no_grad():
-            m.timer.log("setup")
             mutant_head_energy = embedding.link_energy(
                 tokens_batch, mutant_heads)
             mutant_sub_energy = embedding.link_energy(
                 mutants_batch, heads)
-            m.timer.log("mutation-energy")
             normal_energy = embedding.link_energy(
                 tokens_batch, heads)
-            m.timer.log('initial-energy')
 
         # Calculate the energy for each possible point mutation.
         # At each position i, take the energy from either 
@@ -341,7 +260,6 @@ class ParityTokenResampler:
         tokens_mutated[:,1,:] = torch.where(
             do_accept.logical_and(node_parity), mutants_batch, tokens_batch,
         )
-        m.timer.log('setdown')
 
         return tokens_mutated
 
@@ -367,29 +285,24 @@ class CycleProofRerooting2:
         head_sampler = torch.distributions.Categorical(torch.exp(energy))
 
         # Track the head of the sentence (the token whose head is ROOT)
-        # Default value 0 indicates no sentence head is yet established.
+        # Default value 0 indicates that sentence head is not yet established.
         sentence_head = torch.zeros((num_sentences,1), dtype=torch.int64)
 
-        # Each iteration, one node per sentence (ptr) actively selects a head.
-        # This node, and its ancestors are "rooting".
+        # Each iteration, one node per sentence is considered "active".
         ptr_sampler = torch.distributions.Categorical(rooted.logical_not())
         ptr = ptr_sampler.sample().unsqueeze(1)
+        # In each sentence, the "active" node chosen is considered in "rooting"  
         per_sentence = torch.arange(num_sentences)
         rooting[per_sentence,ptr.squeeze(1)] = True
-        i = 0
         while True:
-            i += 1
-            #print(i)
 
-            # Sample a head for the node identified by ptr.
+            # Sample a head for each ptr, and update tree stored in heads. 
             head_sample = head_sampler.sample()
             head_choice = head_sample.gather(dim=1, index=ptr)
             heads[per_sentence, ptr.squeeze(1)] = head_choice.squeeze(1)
-            #print("ptr");print(ptr)
-            #print("heads");print(heads)
 
             # Updates to our tree depend on whether we chose a rooted token
-            # (a token with path to ROOT), and whether we chose ROOT itself.
+            # (a token with path to ROOT), and on whether we chose ROOT itself.
             chose_rooted = rooted.gather(dim=1, index=head_choice)
             chose_ROOT = (head_choice == 0)
 
@@ -405,7 +318,6 @@ class CycleProofRerooting2:
             # As soon as we achieve full rooting of all sentences, we can 
             # stop.  Otherwise, we'll move the pointer and reiterate.
             if fully_rooted.sum() == num_sentences:
-                print("fully rooted after", i, "turns.")
                 break
 
             # Move the pointer and mark the node identified by ptr as rooting.
@@ -415,14 +327,10 @@ class CycleProofRerooting2:
             )
             rooting[per_sentence, new_ptr.squeeze(1)] = True
             rooting[:,0] = False
-            #print("rooting");print(rooting)
-            #print("rooted");print(rooted)
-            #print("new_ptr");print(new_ptr)
 
             # Update the sentence head.
             sentence_head = torch.where(chose_ROOT, ptr, sentence_head)
 
-            #pdb.set_trace()
             ptr = new_ptr
 
         return heads
@@ -613,10 +521,6 @@ class CycleProofRerooting:
                 + chose_root * (sentence_head == 0).unsqueeze(1)
             )
 
-            #if(chose_root):
-            #    print("do sample:", do_sample)
-            #    pdb.set_trace()
-
             new_pointer = (
                 do_sample.squeeze(1) * pointer_selector.sample()
                 + next_head * (
@@ -656,7 +560,6 @@ class RootReset:
         touched = torch.zeros(tokens_batch.shape, dtype=torch.bool)
         finished = torch.zeros(tokens_batch.shape, dtype=torch.bool)
 
-        #ptr = ptr_resetter.sample()
         per_sentence = torch.arange(num_sentences)
         ptr = torch.randint(1,tokens_batch.shape[1], (tokens_batch.shape[0],))
         while True:
@@ -667,7 +570,6 @@ class RootReset:
 
             head_ptr_sample = head_ptr_selector.sample()
             head_ptr_next = head_ptr_sample[per_sentence, ptr]
-            print(ptr[0], "=>", head_ptr_next[0])
 
             # If we select root as head before all is touched, we'll reject
             # it (won't record it in head).

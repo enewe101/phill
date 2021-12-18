@@ -63,33 +63,15 @@ mutation-energy : 16.595839500427246
 initial-energy  : 0.5484292507171631
 setdown         : 0.5430400371551514
 
-retiming-energy
-setup           : 1.3042283058166504
-mutation-energy : 2.5119576454162598
-initial-energy  : 1.1871774196624756
-setdown         : 11.37508773803711
+fast
+setup           : 2.4392545223236084
+mutation-energy : 4.4846320152282715
+initial-energy  : 2.1356067657470703
+setdown         : 19.307172060012817
 
-retiming-energy
-setup           : 2.457465887069702
-mutation-energy : 4.579146385192871
-initial-energy  : 2.1311159133911133
-setdown         : 18.973599672317505
-
-retiming-energy
-setup           : 4.893240690231323
-mutation-energy : 8.986969709396362
-initial-energy  : 4.248817682266235
-setdown         : 37.71730065345764
-
-retiming-energy
-setup           : 12.198022842407227
-mutation-energy : 22.383103132247925
-initial-energy  : 10.59228777885437
-setdown         : 95.31755232810974
-
-retiming-energy
-setup           : 24.34142541885376
-mutation-energy : 44.487191915512085
-initial-energy  : 21.25020933151245
-setdown         : 187.55372548103333
+slow
+setup           : 13.313409328460693
+mutation-energy : 104.48550367355347
+initial-energy  : 3.1759586334228516
+setdown         : 3.205756902694702
 
