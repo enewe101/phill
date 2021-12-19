@@ -89,7 +89,7 @@ class LengthGroupedDataset(Dataset):
 class PaddedDataset(Dataset):
 
 
-    def __init__(self, path, padding, batch_size=500, min_length=0):
+    def __init__(self, path, padding=0, batch_size=500, min_length=0):
         self.path = path
         self.padding = padding
         self.batch_size = batch_size
@@ -122,11 +122,20 @@ class PaddedDataset(Dataset):
 
 
     def pad_append(self, length, tokens_batch, heads_batch, relations_batch):
+        padding_mask = self.get_padding_mask(length, tokens_batch)
         self.data.append((
             torch.tensor(self.pad(length, tokens_batch)),
             torch.tensor(self.pad(length, heads_batch)),
-            torch.tensor(self.pad(length, relations_batch))
+            torch.tensor(self.pad(length, relations_batch)),
+            torch.tensor(self.get_padding_mask(length, tokens_batch))
         ))
+
+
+    def get_padding_mask(self, length, symbols_batch):
+        return [
+            [False] * len(symbols) + [True] * (length - len(symbols))
+            for symbols in symbols_batch
+        ]
 
 
     def pad(self, length, symbols_batch):

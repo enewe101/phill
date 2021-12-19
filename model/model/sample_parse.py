@@ -114,6 +114,8 @@ class Contention():
 
 class ParityTokenResampler:
 
+    MIN_DEPTH = 7
+
     def __init__(self, Px):
         self.Px = Px
         self.unigram_sampler = torch.distributions.Categorical(self.Px)
@@ -128,61 +130,51 @@ class ParityTokenResampler:
         The parity of a node i True if it is an odd number of hops from ROOT
         and FALSE if it is an even number of hops.  ROOTs parity is False.
         """
-        # We want to partition nodes into two groups: those which are an even
-        # number of steps from the root, and those which are an odd number.
-        # Continually follow links toward the root by recursively indexing
-        # head_ptrs into itself.  Initialize every node to have parity False,
-        # and at each step, toggle the parity if the node has reached ROOT.
-        # The parity of the node will thus reflect the parity of the step on
-        # which it reached ROOT, and hence the parity of the number of steps
-        # from it to ROOT.  Only stop on even parity so that by convention ROOT
-        # always has parity False.
+        # Partition nodes into two groups based on whether they are an even or
+        # odd number of steps from ROOT.  Continually follow links toward the
+        # root by recursively indexing head_ptrs into itself.  At each step,
+        # toggle the parity nodes that have reached ROOT.  The final reflects
+        # the parity of the step on each node reached ROOT.  Stop on an even
+        # parity step such that, by convention ROOT is considered even.  Do at
+        # least MIN_DEPTH steps (typical minimum parse tree depth),
         node_parity = torch.zeros(head_ptrs.shape, dtype=torch.bool)
         reachable = head_ptrs
         step_parity = True
         num_steps = 0
-        # Do at least seven steps, stop only on even parity, (so that ROOT's
-        # parity is False), and continue until all nodes reach ROOT.
-        while num_steps < 7 or step_parity or torch.any(reachable):
+        while num_steps < self.MIN_DEPTH or step_parity or torch.any(reachable):
             node_parity = node_parity ^ (reachable == 0)
             reachable = head_ptrs.gather(dim=-1, index=reachable)
             num_steps += 1
             step_parity = step_parity ^ True
 
         # ROOT's self-loop causes its parity to be wrong. Fix that. 
-        node_parity[...,0] = node_parity[...,0] ^ True
+        node_parity[...,0] = False
 
         return node_parity
 
 
-    def sample_tokens(self, tokens_batch, head_ptrs, embedding):
+    def sample_tokens(self, tokens_batch, head_ptrs, embedding, mask=False):
         num_sentences, num_tokens = tokens_batch.shape
 
-        # Get the mask, and make masked values zero (heads needs this to not
-        # throw error when used as an index to torch.gather.
-        mask = (tokens_batch == -1)
-        tokens_batch[mask] = 0
-        head_ptrs[mask] = 0
-
-        # Randomly sample a bunch of nodes from the unigram distribution
+        # Randomly nodes from the unigram distribution (except at mask).
         mutants_batch = self.unigram_sampler.sample(tokens_batch.shape)
         mutants_batch[mask] = 0 
 
-        # Generate two new token lists for each sentence based on mutants_batch.
-        # Generate a new token list which contains, at position i, the
-        # dereferenced head of i if its head had mutated.
+        # Gather the original head tokens, as well as mutated head tokens.
         mutant_heads = mutants_batch.gather(dim=1, index=head_ptrs)
         heads = tokens_batch.gather(dim=1, index=head_ptrs)
 
-        # Calculate the total energy of sentences in original and mutated 
-        # version.
+        # Calculate the total energy of sentences for three cases:
+        # 1) Where heads and subordinates are not mutated
+        # 2) Where heads are mutated.
+        # 3) Where subordinates are mutated.
         with torch.no_grad():
+            normal_energy = embedding.link_energy(
+                tokens_batch, heads, mask)
             mutant_head_energy = embedding.link_energy(
                 tokens_batch, mutant_heads, mask)
             mutant_sub_energy = embedding.link_energy(
                 mutants_batch, heads, mask)
-            normal_energy = embedding.link_energy(
-                tokens_batch, heads, mask)
 
         # Calculate the energy for each possible point mutation.
         # At each position i, take the energy from either 
@@ -237,12 +229,11 @@ class ParityTokenResampler:
         reject_score = torch.rand(tokens_batch.shape)
         do_accept = accept_score > reject_score
 
-        # Rather than return each individually mutated sentence, we collapse
-        # all mutations into two sentences: one taking all mutations in 
-        # tokens that are an even number of steps from the root, and one
+        # Collapse all mutations into two sentences: one taking all mutations
+        # in tokens that are an even number of steps from the root, and one
         # taking all mutations in tokens that are an odd number of steps from
-        # the root.  This allows us to consider model expectations along all
-        # visible.
+        # the root.  This allows all parameters involved in a sentence
+        # to receive negative sampling signal.
         node_parity = self.get_node_parity(head_ptrs)
         do_accept = do_accept
         tokens_mutated = torch.empty(
@@ -253,22 +244,6 @@ class ParityTokenResampler:
         tokens_mutated[:,1,:] = torch.where(
             do_accept.logical_and(node_parity), mutants_batch, tokens_batch,
         )
-        #
-        # So sample_tokens seems to be adapted to take masked input.
-        # Right now, the output, tokens_mutated, has zeros at mask.
-        # We could have it put out -1s, however, I think that we should adopt
-        # the convention that masked values be zero because it can be interpreted
-        # as an index without problems, and we always want to assert the mask
-        # explicitly in any calculations that need to handle masked values.
-        # This would mean adjusting PaddedDataset to pad with zeros but also
-        # provide a mask.  A slight change to w2v will be needed, since it 
-        # should accept a mask as input rather than inferring it from -1 padding.
-        #
-        # Test node parity more:
-        #   Does it always turn up padding as odd?
-        #   Does it give correct results for a wider variety of trees?
-        #                                           (only tested on two so far)
-        #
 
         return tokens_mutated
 
@@ -605,10 +580,6 @@ class RootReset:
             #    1,tokens_batch.shape[1], (tokens_batch.shape[0],))
             ptr_weight = touched.logical_not() 
             ptr_weight[:,0] = touched.sum(dim=1) >= (tokens_batch.shape[1]-1)
-            try:
-                ptr_reset = torch.distributions.Categorical(ptr_weight).sample()
-            except:
-                pdb.set_trace()
 
             ptr_new = torch.where(
                 reject_and_reset, 

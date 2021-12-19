@@ -13,7 +13,7 @@ import torch
 import model as m
 
 
-PADDING = -1
+PADDING = 0
 TEST_DATA_PATH = os.path.join(os.path.dirname(__file__), "test-data")
 
 def seed_random(seed):
@@ -61,12 +61,22 @@ class DatasetTest(TestCase):
         dataset.read()
 
         found_sentences = set()
-        for tokens_batch, heads_batch, relations_batch in dataset:
+        for items  in dataset:
+
+            # Wherever mask is 1, the batches should be padding.
+            tokens_batch, head_ptrs_batch, relations_batch, mask_batch = items
+            torch.all(tokens_batch[mask_batch] == PADDING)
+            torch.all(head_ptrs_batch[mask_batch] == PADDING)
+            torch.all(relations_batch[mask_batch] == PADDING)
+
+            # Wherever mask is 0, the batches should contain the expected data.
             for i in range(tokens_batch.shape[0]):
+                mask = mask_batch[i].tolist()
                 tokens = tokens_batch[i].tolist()
-                heads = heads_batch[i].tolist()
+                heads = head_ptrs_batch[i].tolist()
                 relations = relations_batch[i].tolist()
-                while tokens[-1] == PADDING:
+                while mask[-1]:
+                    mask.pop()
                     tokens.pop()
                     heads.pop()
                     relations.pop()
@@ -373,34 +383,34 @@ class ParityTokenResamplerTest(TestCase):
         seed_random(0)
         num_sentences = 50000
         num_resampling_steps = 40
-        num_batches = 1
+        num_batches = 10
 
         # We'll use a real sentence, with it's annotated parse structure
         # as a starting point of testing the token resampling function.
         sentence_path = os.path.join(
-            TEST_DATA_PATH, "one-sentence-dataset/sentences.index")
+            TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
         dataset = m.PaddedDataset(sentence_path, PADDING)
         dataset.read()
         dictionary_path = os.path.join(
-            TEST_DATA_PATH, "one-sentence-dataset/tokens.dict")
+            TEST_DATA_PATH, "ten-sentence-dataset/tokens.dict")
         dictionary = m.Dictionary(dictionary_path)
         embedding = m.EmbeddingLayer(len(dictionary),4)
 
-        # We'll use just the first sentence in the dataset.
-        # times to resample many times in parallel.
-        tokens_batch, head_ptrs_batch, _ = dataset[0]
+        # For this test, we will just use sentence 7.  It's actually the first
+        # sentence in the dataset; a quirk of dataset loading puts it in pos 7.
+        tokens_batch, head_ptrs_batch, _, mask = dataset[0]
         _, num_tokens = tokens_batch.shape
-        tokens_batch = tokens_batch[0].unsqueeze(0).expand(num_sentences,-1)
-        head_ptrs_batch = head_ptrs_batch[0].unsqueeze(0).expand(
-            num_sentences,-1)
+        tokens_batch = tokens_batch[7].unsqueeze(0).expand(
+            num_sentences,-1).clone()
+        head_ptrs_batch = head_ptrs_batch[7].unsqueeze(0).expand(
+            num_sentences,-1).clone()
+        mask = mask[7].unsqueeze(0).expand(num_sentences,-1)
 
-        # There's no PADDING because this is a one-sentence dataset.  Add some.
-        new_tokens_batch = torch.full((num_sentences, num_tokens + 5), PADDING)
-        new_head_ptrs_batch = torch.full(
-            (num_sentences, num_tokens + 5), PADDING)
-        new_tokens_batch[:, :num_tokens] = tokens_batch
-        new_head_ptrs_batch[:, :num_tokens] = head_ptrs_batch
-        tokens_batch, head_ptrs_batch = new_tokens_batch, new_head_ptrs_batch
+        # For the sentence selected, we only actually need the first 26 tokens.
+        # Sampling a smaller vocabulary gives faster convergence.
+        restricted_vocab = 145
+        Px_restricted_vocab = dataset.Px[:restricted_vocab]
+        token_sampler = m.sp.ParityTokenResampler(Px_restricted_vocab)
 
         # Continually resample the sentence.  Every resampling generates
         # two mutated sentences, one with "even" tokens mutated and one with
@@ -410,61 +420,62 @@ class ParityTokenResamplerTest(TestCase):
         # should approach model probability dictated by energies.
         # Do this in multiple batches to generate many samples without
         # clogging memory.
-        token_sampler = m.sp.ParityTokenResampler(dataset.Px)
-        watched_mutation_pos = 1
-        counts = torch.zeros(len(dictionary))
+        watched_index = 1
+        counts = torch.zeros(restricted_vocab)
         torch.set_printoptions(sci_mode=False)
         for batch in range(num_batches):
             sys.stdout.write(str(batch)+":")
-            mutated_tokens = tokens_batch.clone().unsqueeze(1).expand(-1,2,-1)
+            mutated_tokens = tokens_batch.unsqueeze(1).expand(-1,2,-1).clone()
             for i in range(num_resampling_steps):
                 sys.stdout.write(str(i))
                 sys.stdout.flush()
                 mutated_tokens = token_sampler.sample_tokens(
-                    mutated_tokens[:,1,:], head_ptrs_batch, embedding)
+                    mutated_tokens[:,1,:], head_ptrs_batch, embedding, mask)
                 sys.stdout.write("\b"*len(str(i)))
             # Count how often token j is chosen as head by token i
             for i in range(num_sentences):
-                counts[mutated_tokens[i,1,watched_mutation_pos]] += 1
+                counts[mutated_tokens[i,1,watched_index]] += 1
             sys.stdout.write("\b"*(len(str(batch))+1))
 
         # Get the probability of choosing any given token at
-        # watched_mutation_pos.
+        # watched_index.
         found_probs = counts / counts.sum()
 
         # We will look at the rate of occurrence of mutations in specific
-        # locations.  Consider the token at watched_mutation_pos.  The
+        # locations.  Consider the token at watched_index.  The
         # distribution of mutants in that position should be proportional to
         # the exp(sum of energies of its head and subordinate relations).
         heads = tokens_batch[0].gather(dim=0, index=head_ptrs_batch[0])
-        pos_head_loc = heads[watched_mutation_pos].unsqueeze(0)
-        pos_head = tokens_batch[0, pos_head_loc]
-        pos_subs_loc = (
-            heads==tokens_batch[0, watched_mutation_pos]).nonzero().squeeze(1)
+        pos_head = heads[watched_index].unsqueeze(0)
+        pos_subs_loc = heads==tokens_batch[0, watched_index]
+        pos_subs_loc[mask[0]] = 0
+        pos_subs_loc = pos_subs_loc.nonzero().squeeze(1)
         pos_subs = tokens_batch[0, pos_subs_loc]
 
-        # Calculate the total link energy to the head and subordinate of 
-        # the token in position 1, when each element of the vocabulary adopts
-        # that role.
+        # Calculate the total link energy when the watched_pos token is mutated
+        # into each of the possible words in the vocabulary.
         with torch.no_grad():
             sub_energy = (
-                embedding.V @ embedding.U[pos_subs].T
-                + embedding.Vbias + embedding.Ubias[pos_subs].T
+                embedding.V[:restricted_vocab] @ embedding.U[pos_subs].T
+                + embedding.Vbias[:restricted_vocab] 
+                + embedding.Ubias[pos_subs].T
             ).sum(dim=1)
             head_energy = (
-                embedding.U @ embedding.V[pos_head].T
-                + embedding.Ubias + embedding.Vbias[pos_head].T
+                embedding.U[:restricted_vocab] @ embedding.V[pos_head].T
+                + embedding.Ubias[:restricted_vocab] 
+                + embedding.Vbias[pos_head].T
             ).squeeze(1)
         mutation_energy = sub_energy + head_energy
         weights = torch.exp(mutation_energy)
         expected_probs = weights / weights.sum()
 
         print("expected_probs, found_probs")
-        print_probs = torch.zeros(3, len(dictionary))
+        print_probs = torch.zeros(3, restricted_vocab)
         print_probs[0] = expected_probs
         print_probs[1] = found_probs
-        print_probs[2] = dataset.Px
+        print_probs[2] = token_sampler.Px
         print(print_probs.T)
+        pdb.set_trace()
         self.assertTrue(torch.allclose(found_probs, expected_probs, atol=4e-3))
 
 
