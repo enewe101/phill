@@ -128,45 +128,29 @@ class ParityTokenResampler:
         The parity of a node i True if it is an odd number of hops from ROOT
         and FALSE if it is an even number of hops.  ROOTs parity is False.
         """
-        # We want to partition nodes into two groups: those which are an 
-        # even number of steps from the root, and those which are an odd number. 
-
-        # Our approach will be to continually follow links toward the root.
-        # Starting with head_ptrs, we recursively index head_ptrs into itself.
-        # This has the effect that the value we see at each index i 
-        # carries the location (index) of nodes reachable from i during a 
-        # walk toward the root.  Every node in a tree eventually reaches the
-        # root.  Because ROOT has a self-link, once a location in the array 
-        # points to ROOT (index 0), it will remain constant.
-
-        # To observe the parity of a node, we continually check whether each
-        # location in the array is 0 (at ROOT), and XOR this with a node_parity
-        # array that is initially zero. Once nodes reach root, their
-        # corresponding parity value will continually toggle.  Once all nodes
-        # are at ROOT, we stop, and the parity value will reflect the parity of
-        # the step on which that node reached ROOT.  This gives the correct
-        # relative parity, but all parities might have to be toggled one more
-        # time for parities to be recorded with ROOT as even.  Also, ROOTs
-        # parity will come out wrong, because of ROOTs self loop, which gets
-        # cleaned up.
-
+        # We want to partition nodes into two groups: those which are an even
+        # number of steps from the root, and those which are an odd number.
+        # Continually follow links toward the root by recursively indexing
+        # head_ptrs into itself.  Initialize every node to have parity False,
+        # and at each step, toggle the parity if the node has reached ROOT.
+        # The parity of the node will thus reflect the parity of the step on
+        # which it reached ROOT, and hence the parity of the number of steps
+        # from it to ROOT.  Only stop on even parity so that by convention ROOT
+        # always has parity False.
         node_parity = torch.zeros(head_ptrs.shape, dtype=torch.bool)
         reachable = head_ptrs
-        while True:
+        step_parity = True
+        num_steps = 0
+        # Do at least seven steps, stop only on even parity, (so that ROOT's
+        # parity is False), and continue until all nodes reach ROOT.
+        while num_steps < 7 or step_parity or torch.any(reachable):
             node_parity = node_parity ^ (reachable == 0)
             reachable = head_ptrs.gather(dim=-1, index=reachable)
-            if not torch.any(reachable):
-                break
+            num_steps += 1
+            step_parity = step_parity ^ True
 
         # ROOT's self-loop causes its parity to be wrong. Fix that. 
         node_parity[...,0] = node_parity[...,0] ^ True
-
-        # Parities are *relatively* correct, but may all have to be toggled
-        # for the parity of ROOT to be False. Toggle if needed.
-        needs_toggle =  node_parity[...,0]
-        needs_toggle = needs_toggle.unsqueeze(len(node_parity.shape)-1)
-        needs_toggle = needs_toggle.expand(node_parity.shape)
-        node_parity = node_parity ^ needs_toggle
 
         return node_parity
 
@@ -285,7 +269,6 @@ class ParityTokenResampler:
         #   Does it give correct results for a wider variety of trees?
         #                                           (only tested on two so far)
         #
-        pdb.set_trace()
 
         return tokens_mutated
 

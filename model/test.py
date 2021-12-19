@@ -13,6 +13,7 @@ import torch
 import model as m
 
 
+PADDING = -1
 TEST_DATA_PATH = os.path.join(os.path.dirname(__file__), "test-data")
 
 def seed_random(seed):
@@ -55,9 +56,8 @@ class DatasetTest(TestCase):
     def test_padded_dataset(self):
         path = os.path.join(
             TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
-        padding = -1
         batch_size = 7
-        dataset = m.PaddedDataset(path, padding, batch_size)
+        dataset = m.PaddedDataset(path, PADDING, batch_size)
         dataset.read()
 
         found_sentences = set()
@@ -66,7 +66,7 @@ class DatasetTest(TestCase):
                 tokens = tokens_batch[i].tolist()
                 heads = heads_batch[i].tolist()
                 relations = relations_batch[i].tolist()
-                while tokens[-1] == padding:
+                while tokens[-1] == PADDING:
                     tokens.pop()
                     heads.pop()
                     relations.pop()
@@ -281,39 +281,90 @@ class ParityTokenResamplerTest(TestCase):
         # We'll use a couple real sentences with annotated parse structure
         sentence_path = os.path.join(
             TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
-        dataset = m.LengthGroupedDataset(sentence_path)
+        dataset = m.PaddedDataset(sentence_path, PADDING)
         dataset.read()
         dictionary_path = os.path.join(
             TEST_DATA_PATH, "ten-sentence-dataset/tokens.dict")
         dictionary = m.Dictionary(dictionary_path)
 
-        # Build the sampler, and read the batch from the dataset
+        # Build the sampler, and read the batch from the dataset.  Adjust
+        # padding
         sampler = m.sp.ParityTokenResampler(dataset.Px)
-        tokens_batch, heads_batch, relations_batch = dataset[3] # > 1 sentence
+        tokens_batch, head_ptrs_batch, relations_batch = dataset[0]
+        mask = (head_ptrs_batch == -1)
+        head_ptrs_batch[mask] = 0
 
         # Test the target function
-        found_node_parities = sampler.get_node_parity(heads_batch)
+        found_node_parities = sampler.get_node_parity(head_ptrs_batch)
 
         # These were verified by hand.
         expected_node_parities = torch.tensor([
             [
-                False, False, False,  True, False, False,  True,  True,  True,
-                False, False, False,  True,  True,  True, False, False
+                False, True, False, False, False, True, True, True, False,
+                False, False, False, True, False, True, True, True, True, True,
+                True, True, True, True, True, True, True, True, True, True,
+                True, True, True, True, True, True, True, True
             ],[
-                False,  True, False, False,  True,  True,  True,  True,  True,
-                True, True, False, False, False, False,  True, False
+                False, False, True, True, True, True, False, False, True,
+                False, False, False, True, False, True, True, True, True, True,
+                True, True, True, True, True, True, True, True, True, True,
+                True, True, True, True, True, True, True, True
+            ],[
+                False, False, False, True, False, False, True, True, True,
+                False, False, False, True, True, True, False, False, True,
+                True, True, True, True, True, True, True, True, True, True,
+                True, True, True, True, True, True, True, True, True
+            ],[
+                False, True, False, False, True, True, True, True, True, True,
+                True, False, False, False, False, True, False, True, True,
+                True, True, True, True, True, True, True, True, True, True,
+                True, True, True, True, True, True, True, True
+            ],[
+                False, True, False, False, True, False, False, False, False,
+                True, False, True, True, False, True, True, False, False, True,
+                True, True, True, True, True, True, True, True, True, True,
+                True, True, True, True, True, True, True, True
+            ],[
+                False, False, True, False, False, False, False, True, False,
+                False, True, False, False, True, False, False, True, False,
+                False, True, True, True, True, True, True, True, True, True,
+                True, True, True, True, True, True, True, True, True
+            ],[
+                False, False, True, False, True, False, True, True, True,
+                False, False, False, False, True, True, True, True, False,
+                True, False, False, True, True, True, True, True, True, True,
+                True, True, True, True, True, True, True, True, True
+            ],[
+                False, True, False, False, False, False, True, False, True,
+                False, False, False, False, False, True, False, False, False,
+                True, True, True, False, False, True, True, False, False,
+                False, True, False, True, True, True, True, True, True, True
+            ],[
+                False, True, False, True, True, True, False, False, True,
+                False, False, True, True, False, True, True, False, False,
+                False, False, False, True, True, False, False, True, False,
+                True, True, False, False, False, True, True, False, False,
+                True
+            ],[
+                False, True, False, False, True, False, True, True, True, True,
+                False, False, False, True, True, False, False, True, True,
+                False, False, True, False, False, False, False, True, True,
+                True, True, True, False, False, False, False, True, False
             ]
         ])
-        torch.equal(found_node_parities, expected_node_parities)
+
+        self.assertTrue(torch.equal(
+            found_node_parities, expected_node_parities))
 
         # Now add another batching dimension.  The function should simply 
         # treat the final dimension as the dimension indexed by tree structure
         # and should treat all others simply as batching.  So, the expected
         # result will simply be similarly reshaped.
-        rebatched_heads = heads_batch.unsqueeze(0).expand(5,-1,-1)
+        rebatched_heads = head_ptrs_batch.unsqueeze(0).expand(5,-1,-1)
         found_node_parities = sampler.get_node_parity(rebatched_heads)
         expected_node_parities = expected_node_parities.unsqueeze(0).expand(
             5,-1,-1)
+        self.assertTrue(torch.equal(found_node_parities, expected_node_parities))
         
 
     #@skip("Long test")
@@ -323,13 +374,12 @@ class ParityTokenResamplerTest(TestCase):
         num_sentences = 50000
         num_resampling_steps = 40
         num_batches = 1
-        padding = -1
 
         # We'll use a real sentence, with it's annotated parse structure
         # as a starting point of testing the token resampling function.
         sentence_path = os.path.join(
             TEST_DATA_PATH, "one-sentence-dataset/sentences.index")
-        dataset = m.PaddedDataset(sentence_path, padding)
+        dataset = m.PaddedDataset(sentence_path, PADDING)
         dataset.read()
         dictionary_path = os.path.join(
             TEST_DATA_PATH, "one-sentence-dataset/tokens.dict")
@@ -344,10 +394,10 @@ class ParityTokenResamplerTest(TestCase):
         head_ptrs_batch = head_ptrs_batch[0].unsqueeze(0).expand(
             num_sentences,-1)
 
-        # There's no padding because this is a one-sentence dataset.  Add some.
-        new_tokens_batch = torch.full((num_sentences, num_tokens + 5), padding)
+        # There's no PADDING because this is a one-sentence dataset.  Add some.
+        new_tokens_batch = torch.full((num_sentences, num_tokens + 5), PADDING)
         new_head_ptrs_batch = torch.full(
-            (num_sentences, num_tokens + 5), padding)
+            (num_sentences, num_tokens + 5), PADDING)
         new_tokens_batch[:, :num_tokens] = tokens_batch
         new_head_ptrs_batch[:, :num_tokens] = head_ptrs_batch
         tokens_batch, head_ptrs_batch = new_tokens_batch, new_head_ptrs_batch
