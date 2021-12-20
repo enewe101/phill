@@ -408,7 +408,7 @@ class ParityTokenResamplerTest(TestCase):
 
         # For the sentence selected, we only actually need the first 26 tokens.
         # Sampling a smaller vocabulary gives faster convergence.
-        restricted_vocab = 145
+        restricted_vocab = 26 # full vocab of ten-sentence-dataset is 145
         Px_restricted_vocab = dataset.Px[:restricted_vocab]
         token_sampler = m.sp.ParityTokenResampler(Px_restricted_vocab)
 
@@ -446,6 +446,8 @@ class ParityTokenResamplerTest(TestCase):
         # distribution of mutants in that position should be proportional to
         # the exp(sum of energies of its head and subordinate relations).
         heads = tokens_batch[0].gather(dim=0, index=head_ptrs_batch[0])
+
+        # DEBUG - inputting incorrect watched_index to see effect.
         pos_head = heads[watched_index].unsqueeze(0)
         pos_subs_loc = heads==tokens_batch[0, watched_index]
         pos_subs_loc[mask[0]] = 0

@@ -1,5 +1,4 @@
 init
-init
 sample-noise                   : 0.26791882514953613
 generate-point-mutations       : 0.06081199645996094
 head-deref                     : 0.09000611305236816
@@ -74,4 +73,18 @@ setup           : 13.313409328460693
 mutation-energy : 104.48550367355347
 initial-energy  : 3.1759586334228516
 setdown         : 3.205756902694702
+
+where-10-1
+setup               : 0.7870011329650879
+link-energy         : 2.7951412200927734
+sentence-energy     : 7.516680717468262
+metropolis-hastings : 0.39455199241638184
+parity-assembly     : 0.8977723121643066
+
+mult-10-1
+setup               : 0.6814134120941162
+link-energy         : 2.005758047103882
+sentence-energy     : 10.126966714859009
+metropolis-hastings : 0.2963438034057617
+parity-assembly     : 0.7529888153076172
 
