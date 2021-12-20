@@ -59,16 +59,10 @@ func watch_progress(
 // Dispatch workers to proces chunks of a file breaking them into tokens
 // and putting the tokens on a resultsChannel.  Consume tokens from the 
 // resultsChannel and add them to a dictionary.  Write the dictionary to disk.
-func makeDictionary(inPath string, outDir string) {
-
-
-	// Open file for reading.
-	file, err := os.Open(inPath)
-	if err != nil {panic(err.Error())}
-	defer file.Close()
+func makeDictionary(inPaths []string, outDir string) {
 
 	// Create the directory where output will be written, if not exist.
-	err = os.Mkdir(outDir, 0777)
+	err := os.Mkdir(outDir, 0777)
 	if err != nil && !errors.Is(err, fs.ErrExist) {panic(err.Error())}
 
 	// File for writing token dictionary
@@ -84,19 +78,28 @@ func makeDictionary(inPath string, outDir string) {
 	tokenChannel := make(chan *[]string, 100)
 	relationChannel := make(chan *[]string, 100)
 
-	// Set up for producers
-	num_workers := 2
-	if err != nil {panic(err.Error())}
-	chunk_group := NewChunkerGroup(
-		file, 4*1024, 1024, []byte(delim), num_workers)
-	var producerGroup sync.WaitGroup
-
-	// Start worker producers to read and process chunks of file
+	// Start workers on each of the input files.
 	processFunc := getDictChunkProcessor(tokenChannel, relationChannel)
-	for i:=0; i<num_workers; i++ {
-		producerGroup.Add(1)
-		go worker(chunk_group[i], &producerGroup, processFunc)
+	numWorkersPerFile := 2
+	var producerGroup sync.WaitGroup
+	for _, inPath := range inPaths {
+
+		// Open the file.
+		file, err := os.Open(inPath)
+		if err != nil {panic(err.Error())}
+		defer file.Close()
+
+		// Set up for producers
+		chunk_group := NewChunkerGroup(
+			file, 4*1024, 1024, []byte(delim), numWorkersPerFile)
+
+		// Start worker producers to read and process chunks of file
+		for i:=0; i<numWorkersPerFile; i++ {
+			producerGroup.Add(1)
+			go worker(chunk_group[i], &producerGroup, processFunc)
+		}
 	}
+
 
 	// Create and  initialize dictionaries for tokens and relations.  Add a
 	// couple special tokens.  <ROOT> represents the root of sentences, and
@@ -113,6 +116,7 @@ func makeDictionary(inPath string, outDir string) {
 	tokenDict := NewDictionary()
 	tokenDict.Add("<ROOT>")
 	tokenDict.Add("<UNK>")
+	tokenDict.Add("<PAD>")
 	relationDict := NewDictionary()
 	relationDict.Add("self")
 
@@ -124,7 +128,7 @@ func makeDictionary(inPath string, outDir string) {
 	go writeDictionary(
 		&relationDict, relationDictFile, relationChannel, &consumerGroup)
 
-	// this process will watch the waitgroup and close the channel 
+	// this process will watch the waitgroup and close the channels
 	// once workers are all done.
 	go watch_progress(&producerGroup, tokenChannel, relationChannel)
 
@@ -154,7 +158,6 @@ func writeDictionary(
 // split into tokens, and these are placed onto a results channel for further
 // processing
 func getDictChunkProcessor(
-
 	tokenChannel chan<- *[]string,
 	relationChannel chan<- *[]string) chunkProcessor {
 
@@ -248,38 +251,43 @@ func getIndexChunkProcessor(
 // Dispatch workers to proces chunks of a file breaking them into tokens
 // and putting the tokens on a results channel.  Consume tokens from the results
 // channel and add them to a dictionary.  Write the dictionary to disk.
-func indexSentences(inPath string, outDir string) {
-
-	// Open file for reading.
-	file, err := os.Open(inPath)
-	if err != nil {panic(err.Error())}
-	defer file.Close()
-
-	// Paths to dictionary files that will also be read.
-	tokenDictPath := outDir + "/" + tokenDictFname
-	relationDictPath := outDir + "/" + relationDictFname
+func indexSentences(inPaths []string, outDir string) {
 
 	// Create file for sentence index.  outDir must exist.
 	outfile, err := os.Create(outDir + "/" + sentenceFname)
 	if err != nil {panic(err.Error())}
 	defer outfile.Close()
 
-	// Set up for producers
-	resultChannel := make(chan *[]string, 1000)
-	num_workers := 1
-	if err != nil {panic(err.Error())}
-	chunk_group := NewChunkerGroup(
-		file, 10*1024, 1024, []byte(delim), num_workers)
-	var producerGroup sync.WaitGroup
+	// Read dictionaries that will be used to encode lexical items as ids.
+	tokenDictPath := outDir + "/" + tokenDictFname
+	relationDictPath := outDir + "/" + relationDictFname
 	tokenDict := ReadDictionary(tokenDictPath)
 	relationDict := ReadDictionary(relationDictPath)
 
-	// Start worker producers to read and process chunks of file
+	// Set up channels and waitroup for producers.
+	resultChannel := make(chan *[]string, 1000)
+	num_workers := 1
+	var producerGroup sync.WaitGroup
+
+	// Curry channel and dictionaries into the chunk processing function
 	processFunc := getIndexChunkProcessor(
 		resultChannel, &tokenDict, &relationDict)
-	for i:=0; i<num_workers; i++ {
-		producerGroup.Add(1)
-		go worker(chunk_group[i], &producerGroup, processFunc)
+
+	// Start workers on each conllu file.
+	for _, inPath := range inPaths {
+
+		// Open file and create a chunk group to read it.
+		file, err := os.Open(inPath)
+		if err != nil {panic(err.Error())}
+		defer file.Close()
+		chunk_group := NewChunkerGroup(
+			file, 10*1024, 1024, []byte(delim), num_workers)
+
+		// Start worker producers to read and process chunks of file.
+		for i:=0; i<num_workers; i++ {
+			producerGroup.Add(1)
+			go worker(chunk_group[i], &producerGroup, processFunc)
+		}
 	}
 
 	// this process will watch the waitgroup and close the channel 
