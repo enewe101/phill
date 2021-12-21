@@ -1,4 +1,5 @@
 import os
+import sys
 import pdb
 import time
 from collections import defaultdict
@@ -10,7 +11,7 @@ import model as m
 
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-DATA_DIR = os.path.join(SCRIPT_DIR, "../../../data/processed")
+DATA_DIR = os.path.join(SCRIPT_DIR, "../../../data/processed/all-train")
 
 
 def train1(data_path=DATA_DIR):
@@ -38,8 +39,8 @@ def train1(data_path=DATA_DIR):
 def train_w2v(data_path=DATA_DIR):
 
     lr = 1e-2
-    num_epochs = 5
-    batch_size = 1000
+    num_epochs = 100
+    batch_size = 100
 
     # Load a dataset
     #data = m.LengthGroupedDataset(os.path.join(data_path, "sentences.index"))
@@ -50,7 +51,7 @@ def train_w2v(data_path=DATA_DIR):
     dictionary = m.Dictionary(os.path.join(data_path, "tokens.dict"))
 
     # Initialize model
-    embedding_dimension = 500
+    embedding_dimension = 300
     embedding = m.EmbeddingLayer(len(dictionary), embedding_dimension)
     model = Word2VecModel(embedding, data.Px)
     optimizer = torch.optim.SGD(embedding.parameters(), lr=lr)
@@ -58,13 +59,12 @@ def train_w2v(data_path=DATA_DIR):
     # Draw a positive batch from the dataset
     m.timer.start()
     for epoch in range(num_epochs):
+        print("epoch:", epoch)
         epoch_loss = torch.tensor(0.)
 
-        for tokens_batch, _, _  in data:
-
-            # Don't allow 1-token sentences (which have length 2 due to <ROOT>)
-            if tokens_batch.shape[1] <= 2:
-                continue
+        for batch_num, (tokens_batch, _, _, mask)  in enumerate(data):
+            sys.stdout.write(str(batch_num))
+            sys.stdout.flush()
 
             with torch.no_grad():
                 m.timer.log("setup")
@@ -76,7 +76,6 @@ def train_w2v(data_path=DATA_DIR):
             mask = (tokens_batch == -1)
             mask[:,0] = True
 
-            pdb.set_trace()
             loss = -torch.where(
                 mask,
                 torch.tensor([[0]], dtype=torch.float),
@@ -91,28 +90,43 @@ def train_w2v(data_path=DATA_DIR):
             with torch.no_grad():
                 epoch_loss += loss/(tokens_batch.shape[0]*tokens_batch.shape[1])
 
-        print(m.timer.repr())
+            sys.stdout.write("\b" * len(str(batch_num)))
 
-        words = ["recently", "ran", "Paris", "debt", "doctor", "is"]
-        ids = dictionary.get_ids(words)
+        print("\n" + m.timer.repr())
+
+        words = [
+            "apparently", "would", "gave", "said",
+            "lawyer", "the", "fast", "Washington"
+        ]
         with torch.no_grad():
-            heads = dictionary.get_tokens([
-                embedding.head_match(idx) for idx in ids])
-            similar = dictionary.get_tokens([
-                embedding.similar(idx) for idx in ids])
+            for word in words:
+                word_id = dictionary.get_id(word)
+                heads = dictionary.get_tokens(embedding.head_match(word_id, 5))
+                similars = dictionary.get_tokens(embedding.similar(word_id, 5))
+                print(word, "|", " ".join(heads), "|", " ".join(similars))
 
-        print("\n")
-        print(embedding.U[ids[0],:3], embedding.Ubias[ids[0]])
         print(epoch_loss)
-        print(words)
-        print(heads)
-        print(similar)
 
     print(m.timer.repr())
-    m.timer.write("timer", "w2v-padding-batch1000")
+    run_code = get_run_code(
+        batch_size, num_epochs, embedding_dimension, "conllu")
+    m.timer.write("w2v-timer", run_code)
+    torch.save(
+        (embedding.U, embedding.Ubias, embedding.V, embedding.Vbias),
+        run_code+".pt"
+    )
+    pdb.set_trace()
     return model
 
 
+def get_run_code(batch_size, num_epochs, embedding_dimension, corpus):
+    return (
+        f"w2v"
+        f"-b{batch_size}"
+        f"-e{num_epochs}"
+        f"-d{embedding_dimension}"
+        f"-{corpus}"
+    )
 
 def print_tree(headlist, curnode=0, depth=0):
     print('  ' * depth + str(curnode))
@@ -128,6 +142,17 @@ def print_tree(headlist, curnode=0, depth=0):
 
         print_tree(headlist, curnode=child, depth=depth+1)
 
+
+
+class GraphParseModel:
+
+    def __init__(self):
+        self.embedding = embedding_layer
+        self.kernel = [torch.tensor(v) for v in [0,5,4,3,2,1]]
+        self.set_Px(Px)
+        self.unigram_sampler = torch.distributions.Categorical(self.Px)
+
+    sample_parses = m.sample_parses.
 
 
 class Word2VecModel:

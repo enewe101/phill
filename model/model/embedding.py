@@ -19,18 +19,17 @@ class EmbeddingLayer(nn.Module):
         self.Vbias = nn.Parameter(torch.randn(vocab_size, 1))
 
 
-    def head_match(self, token_id):
-        return (self.V @ self.U[token_id]).argmax()
+    def head_match(self, token_id, k=5):
+        return (self.V @ self.U[token_id]).topk(k).indices.tolist()
 
 
-    def similar(self, token_id):
+    def similar(self, token_id, k=5):
         similarity = (self.U @ self.U[token_id])
-        most_similar = similarity.topk(2).indices
-        most_similar_nonidentical = (
-            most_similar[0] 
-            if most_similar[0] != token_id
-            else most_similar[1]
-        )
+        most_similar = similarity.topk(k+1).indices.tolist()
+        most_similar_nonidentical = [
+            elm for elm in most_similar 
+            if elm != token_id
+        ][:k]
         return most_similar_nonidentical
 
 
