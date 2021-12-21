@@ -13,7 +13,7 @@ import torch
 import model as m
 
 
-PADDING = 0
+PAD = 0
 TEST_DATA_PATH = os.path.join(os.path.dirname(__file__), "test-data")
 
 def seed_random(seed):
@@ -57,7 +57,7 @@ class DatasetTest(TestCase):
         path = os.path.join(
             TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
         batch_size = 7
-        dataset = m.PaddedDataset(path, PADDING, batch_size)
+        dataset = m.PaddedDataset(path, PAD, batch_size)
         dataset.read()
 
         found_sentences = set()
@@ -65,9 +65,9 @@ class DatasetTest(TestCase):
 
             # Wherever mask is 1, the batches should be padding.
             tokens_batch, head_ptrs_batch, relations_batch, mask_batch = items
-            torch.all(tokens_batch[mask_batch] == PADDING)
-            torch.all(head_ptrs_batch[mask_batch] == PADDING)
-            torch.all(relations_batch[mask_batch] == PADDING)
+            torch.all(tokens_batch[mask_batch] == PAD)
+            torch.all(head_ptrs_batch[mask_batch] == PAD)
+            torch.all(relations_batch[mask_batch] == PAD)
 
             # Wherever mask is 0, the batches should contain the expected data.
             for i in range(tokens_batch.shape[0]):
@@ -196,7 +196,8 @@ class Word2VecModelTest(TestCase):
         for i in range(num_sentences):
             for j in range(num_tokens):
                 # A head should never be selected beyond the support of the
-                # kernel.  The following line would trigger an index error if so.
+                # kernel.  The following line would trigger an index error if
+                # so.
                 dist_counts[distances[i,j]] += 1
 
         # Adjust counts to exclude <ROOT> choosing itself in each sentence.
@@ -209,6 +210,12 @@ class Word2VecModelTest(TestCase):
 
     def test_sample_tokens(self):
 
+        # TODO: make this explicitly calculate mutation energies over the
+        # full vocabulary, rather than taking advantage of the fact that 
+        # we have a full-vocab sentence and using a call to sentence energy
+        # while passing mask = False.  Although it works, it is creating
+        # contention over what mask should do in that function, and it makes
+        # the intended functionality harder to understand.
         seed_random(0)
 
         vocab = 10
@@ -261,7 +268,7 @@ class Word2VecModelTest(TestCase):
         # Calculate the expected probability of each token chosing each head
         # We're assuming that sentence_link_energy works
         energy = embedding.sentence_link_energy(
-            tokens_batch[0].unsqueeze(0),mask=False).squeeze(0)
+            tokens_batch[0].unsqueeze(0),mask_root_diag=False).squeeze(0)
         probs = torch.exp(energy)
 
         # We're expecting root to always choose root, and other tokens to never
@@ -291,7 +298,7 @@ class ParityTokenResamplerTest(TestCase):
         # We'll use a couple real sentences with annotated parse structure
         sentence_path = os.path.join(
             TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
-        dataset = m.PaddedDataset(sentence_path, PADDING)
+        dataset = m.PaddedDataset(sentence_path, PAD)
         dataset.read()
         dictionary_path = os.path.join(
             TEST_DATA_PATH, "ten-sentence-dataset/tokens.dict")
@@ -300,7 +307,7 @@ class ParityTokenResamplerTest(TestCase):
         # Build the sampler, and read the batch from the dataset.  Adjust
         # padding
         sampler = m.sp.ParityTokenResampler(dataset.Px)
-        tokens_batch, head_ptrs_batch, relations_batch = dataset[0]
+        tokens_batch, head_ptrs_batch, relations_batch, mask = dataset[0]
         mask = (head_ptrs_batch == -1)
         head_ptrs_batch[mask] = 0
 
@@ -374,7 +381,8 @@ class ParityTokenResamplerTest(TestCase):
         found_node_parities = sampler.get_node_parity(rebatched_heads)
         expected_node_parities = expected_node_parities.unsqueeze(0).expand(
             5,-1,-1)
-        self.assertTrue(torch.equal(found_node_parities, expected_node_parities))
+        self.assertTrue(torch.equal(
+            found_node_parities, expected_node_parities))
         
 
     #@skip("Long test")
@@ -389,7 +397,7 @@ class ParityTokenResamplerTest(TestCase):
         # as a starting point of testing the token resampling function.
         sentence_path = os.path.join(
             TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
-        dataset = m.PaddedDataset(sentence_path, PADDING)
+        dataset = m.PaddedDataset(sentence_path, PAD)
         dataset.read()
         dictionary_path = os.path.join(
             TEST_DATA_PATH, "ten-sentence-dataset/tokens.dict")
@@ -696,11 +704,11 @@ class ParseSamplingMeasureTests(TestCase):
         sampler = m.sp.Contention()
         self.uniform_test(sampler)
 
-    def test_cpwr2_uniform(self):
+    def test_cycle_proof_rooting_2_uniform(self):
         sampler = m.sp.CycleProofRerooting2()
         self.uniform_test(sampler)
 
-    def test_cycle_proof_walk_with_rerooting_uniform(self):
+    def test_cycle_proof_rooting_1_uniform(self):
         sampler = m.sp.CycleProofRerooting()
         self.uniform_test(sampler)
 
@@ -725,16 +733,37 @@ class ParseSamplingMeasureTests(TestCase):
             embedding.Ubias[:,:] = 0.1
             embedding.Vbias[:,:] = 0.1
 
-        tokens_batch = torch.tensor([[0,1,2,3,4]]).expand(num_sentences,-1)
+        tokens_batch = torch.tensor([[
+            0,1,2,3,4,PAD,PAD,PAD]]).expand(num_sentences,-1)
+        mask = torch.tensor(
+            [[0,0,0,0,0,1,1,1]], dtype=torch.bool).expand(num_sentences,-1)
+
+        # DEBUG: testing a non-mask-using sampler.
+        tokens_batch = torch.tensor([[
+            0,1,2,3,4]]).expand(num_sentences,-1)
+        mask = torch.tensor(
+            [[0,0,0,0,0]], dtype=torch.bool).expand(num_sentences,-1)
+        # /DEBUG
 
         # First we will make a set of all possible rooted trees constructed
         # with four labelled nodes.  
         tree_counter = QuadTreeCounter()
 
         # Count the occurrences of each tree generated by the model
-        trees = sampler.sample(tokens_batch, embedding)
+        trees = sampler.sample(tokens_batch, embedding, mask)
+        # First, ensure no parse has tokens choosing padding as head.
+        self.assertTrue(torch.all(trees[mask.logical_not()]<=4))
+        # First, ensure padding always chooses ROOT.
+        self.assertTrue(torch.all(trees[mask]==0))
+
         for i in range(trees.shape[0]):
+
+            tree = tuple(trees[i].tolist()[:-mask[i].sum()])
+
+            # DEBUG: testing non-mask-using sampler
             tree = tuple(trees[i].tolist())
+            # /DEBUG
+
             tree_counter.add(tree)
         frequencies = torch.tensor([
             val / (num_sentences)
@@ -948,6 +977,7 @@ class EnergyTest(TestCase):
             embedding.link_energy(tokens_batch, heads_batch)
 
 
+    # TODO: update to test new kind of mask
     def test_sentence_link_energy(self):
         embedding = m.EmbeddingLayer(5,4)
         tokens_batch = torch.tensor([[2,0,3], [1,3,4]])
@@ -955,7 +985,7 @@ class EnergyTest(TestCase):
 
         # We're testing the function that calculates token-token link energies.
         found_energy = embedding.sentence_link_energy(
-            tokens_batch, mask=False)
+            tokens_batch, mask_root_diag=False)
 
         # What were we expecting?  It should be the matrix product of the 
         # vectors and covectors plus the biases.  The covectors and covector-
@@ -971,7 +1001,7 @@ class EnergyTest(TestCase):
         # Now try calculating energy where root always self-links and 
         # no other token chooses itself.
         found_energy = embedding.sentence_link_energy(
-            tokens_batch, mask=True)
+            tokens_batch, mask_root_diag=True)
         diagonal = torch.zeros(
             (num_tokens, num_tokens)).fill_diagonal_(-torch.inf)
         expected_energy += diagonal

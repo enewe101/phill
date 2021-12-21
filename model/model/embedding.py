@@ -60,7 +60,14 @@ class EmbeddingLayer(nn.Module):
         return energies
 
 
-    def sentence_link_energy(self, tokens_batch, mask=True):
+    def sentence_link_energy(
+        self,
+        tokens_batch,
+        mask=None,
+        mask_root_diag=True
+    ):
+        num_sentences, num_tokens = tokens_batch.shape
+
         U = self.U[tokens_batch]
         V_T = self.V[tokens_batch].transpose(1,2)
         ub = self.Ubias[tokens_batch]
@@ -74,8 +81,7 @@ class EmbeddingLayer(nn.Module):
         # (<ROOT>s row), and in <ROOT>s row, we put zero for the self energy
         # (exp(0) = 1 probability of selecting self) and -inf for <ROOT>
         # selecting any other token as its head.
-        if mask:
-            num_sentences, num_tokens = tokens_batch.shape
+        if mask_root_diag:
             diag_mask = torch.zeros(
                 (num_tokens, num_tokens)).fill_diagonal_(-torch.inf)
             energy += diag_mask.unsqueeze(0)
@@ -83,6 +89,15 @@ class EmbeddingLayer(nn.Module):
             root_row[0] = 0
             energy[:,0] = root_row
 
+        if mask is not None:
+            # Tokens cannot choose padding as a head
+            mask_head_choice = mask.unsqueeze(1).expand((-1,num_tokens,-1))
+            energy[mask_head_choice] = -torch.inf
+            # Padding cannot choose non-ROOT tokens as a head
+            mask_sub_choice = mask.unsqueeze(2).expand((-1,-1,num_tokens))
+            energy[mask_sub_choice] = -torch.inf
+            # Padding always chooses ROOT as a head
+            energy[:,:,0][mask] = 0
         return energy
 
 

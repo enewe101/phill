@@ -4,24 +4,6 @@ import pdb
 import model as m
 
 
-        # One way to sample only trees is to do as follows
-        #   1. sample one edge.
-        #   2. always consider the "cursor" to point to the head in the most 
-        #       recently selected edge.
-        #   3. Sample from the cursor's possible choices of head.
-        #   4. Repeat 3 until we select the root.  Mark all tokens attached
-        #       to an edge so far as "rooted"
-        #   5. Allow every unrooted token to sample a new head.
-        #   6. Mark any token that takes a rooted token as its head as rooted.
-        #   7. Continue until all tokens are rooted.
-
-        #Sample from trees.  Cannot express conflict or crowding between
-        #tokens as they select their head.
-        # 1. calculate the vector-covector energies
-        # 2. sample one edge with head root. the subordinate is "rooted".
-        # 3. sample one unrooted subordinate having rooted head.
-        # 4. repeat until there are no unrooted subordinates.
-
 
 class Contention():
 
@@ -248,24 +230,42 @@ class ParityTokenResampler:
         return tokens_mutated
 
 
+"""
+tensor([0.0165, 0.0149, 0.0167, 0.0147, 0.0161, 0.0144, 0.0165, 0.0145, 0.0160,
+        0.0163, 0.0145, 0.0163, 0.0148, 0.0174, 0.0159, 0.0145, 0.0162, 0.0148,
+        0.0167, 0.0140, 0.0161, 0.0144, 0.0163, 0.0148, 0.0163, 0.0168, 0.0143,
+        0.0166, 0.0148, 0.0162, 0.0161, 0.0146, 0.0165, 0.0144, 0.0166, 0.0142,
+        0.0164, 0.0148, 0.0165, 0.0145, 0.0161, 0.0164, 0.0149, 0.0165, 0.0144,
+        0.0167, 0.0168, 0.0146, 0.0166, 0.0152, 0.0163, 0.0148, 0.0156, 0.0143,
+        0.0163, 0.0147, 0.0166, 0.0166, 0.0145, 0.0171, 0.0147, 0.0165, 0.0165,
+        0.0148])"""
+
 class CycleProofRerooting2:
 
-    def sample(self, tokens_batch, embedding):
+    def sample(self, tokens_batch, embedding, mask=False):
 
         num_sentences, num_tokens = tokens_batch.shape
 
         # Track which nodes are "rooted" (have a path to ROOT), and which nodes 
         # are "rooting" (part of on an actively growing branch).
+        # PLAN: padding should always be rooted, never rooting.
+        #       padding's head should always ROOT.
+        #       energy for padding as head is always zero, with padding as
+        #       sub, zero except for with ROOT.
+        #       pointer should never be padding.
+        #       sentence head can never be root
         rooted = torch.zeros_like(tokens_batch, dtype=torch.bool)
+        rooted[mask] = True
         rooted[:,0] = True
         fully_rooted = torch.zeros((num_sentences,1), dtype=torch.bool)
         rooting = torch.zeros_like(tokens_batch, dtype=torch.bool)
 
         # Encode the partial parse structure as a choice of head by each token.
-        heads = torch.full_like(tokens_batch, -1)
-        heads[:,0] = 0
+        head_ptrs = torch.full_like(tokens_batch, -1)
+        head_ptrs[mask] = 0
+        head_ptrs[:,0] = 0
         # Heads are chosen randomly with probability based on link energy.
-        energy = embedding.sentence_link_energy(tokens_batch)
+        energy = embedding.sentence_link_energy(tokens_batch, mask)
         head_sampler = torch.distributions.Categorical(torch.exp(energy))
 
         # Track the head of the sentence (the token whose head is ROOT)
@@ -281,20 +281,25 @@ class CycleProofRerooting2:
         while True:
 
             # Sample a head for each ptr, and update tree stored in heads. 
-            head_sample = head_sampler.sample()
-            head_choice = head_sample.gather(dim=1, index=ptr)
-            heads[per_sentence, ptr.squeeze(1)] = head_choice.squeeze(1)
+            # TODO: Right now this samples a head for every token in every 
+            #       sentence, but we only use the sampled head for ptr.
+            #       Is it faster to make a new sampler, just for ptr on each
+            #       round?
+            #
+            head_ptr_sample = head_sampler.sample()
+            this_head_ptr = head_ptr_sample.gather(dim=1, index=ptr)
+            head_ptrs[per_sentence, ptr.squeeze(1)] = this_head_ptr.squeeze(1)
 
             # Updates to our tree depend on whether we chose a rooted token
             # (a token with path to ROOT), and on whether we chose ROOT itself.
-            chose_rooted = rooted.gather(dim=1, index=head_choice)
-            chose_ROOT = (head_choice == 0)
+            chose_rooted = rooted.gather(dim=1, index=this_head_ptr)
+            chose_ROOT = (this_head_ptr == 0)
 
             # Update the rooted / rooting status of nodes.
             new_rooting = self.update_rooting(
-                rooting, rooted, chose_rooted, chose_ROOT, fully_rooted)
+                rooting, rooted, chose_rooted, chose_ROOT, fully_rooted, mask)
             new_rooted = self.update_rooted(
-                rooting, rooted, chose_rooted, chose_ROOT, fully_rooted)
+                rooting, rooted, chose_rooted, chose_ROOT, fully_rooted, mask)
             rooting = new_rooting
             rooted = new_rooted
             fully_rooted = rooted.all(dim=1, keepdim=True)
@@ -306,7 +311,7 @@ class CycleProofRerooting2:
 
             # Move the pointer and mark the node identified by ptr as rooting.
             new_ptr = self.update_ptr(
-                rooted, chose_rooted, chose_ROOT, fully_rooted, head_choice,
+                rooted, chose_rooted, chose_ROOT, fully_rooted, this_head_ptr,
                 sentence_head, 
             )
             rooting[per_sentence, new_ptr.squeeze(1)] = True
@@ -317,18 +322,18 @@ class CycleProofRerooting2:
 
             ptr = new_ptr
 
-        return heads
+        return head_ptrs
 
 
     def update_ptr(
-        self, rooted, chose_rooted, chose_ROOT, fully_rooted, head_choice,
+        self, rooted, chose_rooted, chose_ROOT, fully_rooted, head_ptr,
         sentence_head
     ):
         # In some cases we move ptr to a randomly selected unrooted token.
         # Unrooted tokens are eligible for this random selection, but for
         # sentences where all tokens are rooted, harmlessly set the probability
         # of sampling ROOT to 1.  This avoids a zero-support sampling
-        # error due for sentences with unrooted tokens.
+        # error due for sentences with no unrooted tokens.
         eligible = rooted.logical_not()
         eligible = torch.where(
             fully_rooted,
@@ -347,48 +352,55 @@ class CycleProofRerooting2:
 
         # If we chose an unrooted token, then ptr moves to it.
         ptr = torch.where(
-            chose_rooted.logical_not(), head_choice, ptr)
+            chose_rooted.logical_not(), head_ptr, ptr)
 
         # Keep ptr on ROOT whenever the sentence is fully rooted.
         # This will stop updates to the sentence structure, since ROOT always
         # selects itself as head (preserving the default self-link that it has).
+        #
+        # TODO: this line is redundant due to how eligible is calculated.
+        #       remove!
         ptr = torch.where(fully_rooted, 0, ptr)
 
         return ptr
 
 
     def update_rooting(
-        self, rooting, rooted, chose_rooted, chose_ROOT, fully_rooted
+        self, rooting, rooted, chose_rooted, chose_ROOT, fully_rooted, mask
     ):
-        # If you chose a rooted token, then rooting gets cleared
+        # If you chose a rooted token, then rooting gets cleared.
         new_rooting = torch.where(chose_rooted, False, rooting)
-        # If you chose ROOT, then rooting gets what was rooted
+        # If you chose ROOT, then rooting gets what was rooted.
         new_rooting = torch.where(chose_ROOT, rooted, new_rooting)
         # If you were fully rooted, then rooting is cleared.
         new_rooting = torch.where(fully_rooted, False, new_rooting)
-        # ROOT is never rooting
+        # ROOT is never rooting.
         new_rooting[:,0] = False
+        # Padding is never rooting.
+        new_rooting[mask] = False
         return new_rooting
 
 
     def update_rooted(
-        self, rooting, rooted, chose_rooted, chose_ROOT, fully_rooted
+        self, rooting, rooted, chose_rooted, chose_ROOT, fully_rooted, mask
     ):
-        # If you chose ROOT, then clear what was previously rooted
+        # If you chose ROOT, then clear what was previously rooted.
         new_rooted = torch.where(chose_ROOT, False, rooted)
-        # If you chose a rooted token, then add rooting to rooted
+        # If you chose a rooted token, then add rooting to rooted.
         new_rooted = torch.where(
             chose_rooted, new_rooted.logical_or(rooting), new_rooted)
         # But overriding, if you were fully rooted, always stay that way
         new_rooted = torch.where(fully_rooted, rooted, new_rooted)
-        # ROOT is always rooted
+        # ROOT is always rooted.
         new_rooted[:,0] = True
+        # Padding is always rooted.
+        new_rooted[mask] = True
         return new_rooted
 
 
 class CycleProofRerooting:
 
-    def sample(self, tokens_batch, embedding):
+    def sample(self, tokens_batch, embedding, mask=False):
 
         num_sentences, num_tokens = tokens_batch.shape
         energy = embedding.sentence_link_energy(tokens_batch)

@@ -98,3 +98,22 @@ What I don't like about picking a root independently of the edge weights:
 
 
 
+
+        # One way to sample only trees is to do as follows
+        #   1. sample one edge.
+        #   2. always consider the "cursor" to point to the head in the most 
+        #       recently selected edge.
+        #   3. Sample from the cursor's possible choices of head.
+        #   4. Repeat 3 until we select the root.  Mark all tokens attached
+        #       to an edge so far as "rooted"
+        #   5. Allow every unrooted token to sample a new head.
+        #   6. Mark any token that takes a rooted token as its head as rooted.
+        #   7. Continue until all tokens are rooted.
+
+        #Sample from trees.  Cannot express conflict or crowding between
+        #tokens as they select their head.
+        # 1. calculate the vector-covector energies
+        # 2. sample one edge with head root. the subordinate is "rooted".
+        # 3. sample one unrooted subordinate having rooted head.
+        # 4. repeat until there are no unrooted subordinates.
+

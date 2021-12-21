@@ -152,7 +152,6 @@ class GraphParseModel:
         self.set_Px(Px)
         self.unigram_sampler = torch.distributions.Categorical(self.Px)
 
-    sample_parses = m.sample_parses.
 
 
 class Word2VecModel:
