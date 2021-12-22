@@ -33,12 +33,9 @@ class Contention():
         while True:
             i += 1
 
-            m.timer.start()
             # Find contentions: cycles or multiple roots.
             has_cycle = self.has_cycle(heads)
-            m.timer.log('cycle-check')
             is_multiple_root = self.is_multiple_root(heads, mask)
-            m.timer.log('root-check')
 
             # Resample nodes involved in contentions.
             has_contention = has_cycle.logical_or(is_multiple_root)
@@ -54,7 +51,6 @@ class Contention():
 
             heads_sample = head_selector.sample()
             heads = torch.where(contenders, heads_sample, heads)
-            m.timer.log('other')
 
         return heads
 
@@ -244,16 +240,11 @@ class CycleProofRooting:
 
     def sample(self, tokens_batch, embedding, mask=False):
 
+        m.timer.start()
         num_sentences, num_tokens = tokens_batch.shape
 
         # Track which nodes are "rooted" (have a path to ROOT), and which nodes 
         # are "rooting" (part of on an actively growing branch).
-        # PLAN: padding should always be rooted, never rooting.
-        #       padding's head should always ROOT.
-        #       energy for padding as head is always zero, with padding as
-        #       sub, zero except for with ROOT.
-        #       pointer should never be padding.
-        #       sentence head can never be root
         rooted = torch.zeros_like(tokens_batch, dtype=torch.bool)
         rooted[mask] = True
         rooted[:,0] = True
@@ -266,7 +257,7 @@ class CycleProofRooting:
         head_ptrs[:,0] = 0
         # Heads are chosen randomly with probability based on link energy.
         energy = embedding.sentence_link_energy(tokens_batch, mask)
-        head_sampler = torch.distributions.Categorical(torch.exp(energy))
+        head_probs = torch.exp(energy)
 
         # Track the head of the sentence (the token whose head is ROOT)
         # Default value 0 indicates that sentence head is not yet established.
@@ -280,14 +271,8 @@ class CycleProofRooting:
         rooting[per_sentence,ptr.squeeze(1)] = True
         while True:
 
-            # Sample a head for each ptr, and update tree stored in heads. 
-            # TODO: Right now this samples a head for every token in every 
-            #       sentence, but we only use the sampled head for ptr.
-            #       Is it faster to make a new sampler, just for ptr on each
-            #       round?
-            #
-            head_ptr_sample = head_sampler.sample()
-            this_head_ptr = head_ptr_sample.gather(dim=1, index=ptr)
+            this_head_ptr = torch.distributions.Categorical(
+                head_probs[per_sentence, ptr.squeeze(1)]).sample().unsqueeze(1)
             head_ptrs[per_sentence, ptr.squeeze(1)] = this_head_ptr.squeeze(1)
 
             # Updates to our tree depend on whether we chose a rooted token
@@ -322,6 +307,7 @@ class CycleProofRooting:
 
             ptr = new_ptr
 
+        m.timer.log("other")
         return head_ptrs
 
 

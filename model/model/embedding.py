@@ -44,11 +44,6 @@ class EmbeddingLayer(nn.Module):
         have the same shape.
         """
 
-        if(tokens_batch.shape != heads_batch.shape):
-            raise ValueError(
-                "tokens_batch and heads_batch must have the same shape. Got",
-                tokens_batch.shape, "and", heads_batch.shape, "respectively."
-            )
         last_dim = len(tokens_batch.shape)
 
         energies = (torch.sum(
