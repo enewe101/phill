@@ -704,16 +704,8 @@ class ParseSamplingMeasureTests(TestCase):
         sampler = m.sp.Contention()
         self.uniform_test(sampler)
 
-    def test_cycle_proof_rooting_2_uniform(self):
-        sampler = m.sp.CycleProofRerooting2()
-        self.uniform_test(sampler)
-
-    def test_cycle_proof_rooting_1_uniform(self):
-        sampler = m.sp.CycleProofRerooting()
-        self.uniform_test(sampler)
-
-    def test_root_reset_uniform(self):
-        sampler = m.sp.RootReset()
+    def test_cycle_proof_rooting_uniform(self):
+        sampler = m.sp.CycleProofRooting()
         self.uniform_test(sampler)
 
     def uniform_test(self, sampler):
@@ -738,12 +730,11 @@ class ParseSamplingMeasureTests(TestCase):
         mask = torch.tensor(
             [[0,0,0,0,0,1,1,1]], dtype=torch.bool).expand(num_sentences,-1)
 
-        # DEBUG: testing a non-mask-using sampler.
+        # DEBUG
         tokens_batch = torch.tensor([[
             0,1,2,3,4]]).expand(num_sentences,-1)
         mask = torch.tensor(
             [[0,0,0,0,0]], dtype=torch.bool).expand(num_sentences,-1)
-        # /DEBUG
 
         # First we will make a set of all possible rooted trees constructed
         # with four labelled nodes.  
@@ -757,12 +748,10 @@ class ParseSamplingMeasureTests(TestCase):
         self.assertTrue(torch.all(trees[mask]==0))
 
         for i in range(trees.shape[0]):
-
             tree = tuple(trees[i].tolist()[:-mask[i].sum()])
 
-            # DEBUG: testing non-mask-using sampler
+            #DEBUG
             tree = tuple(trees[i].tolist())
-            # /DEBUG
 
             tree_counter.add(tree)
         frequencies = torch.tensor([
@@ -772,6 +761,8 @@ class ParseSamplingMeasureTests(TestCase):
 
         # The frequencies should be uniform and all close to 1 / num_trees:
         expected_frequency = torch.tensor([1/len(tree_counter)])
+        print(frequencies)
+        print(torch.log(frequencies * len(tree_counter)).abs().sum())
         self.assertTrue(torch.allclose(
             frequencies,
             expected_frequency,
@@ -782,16 +773,8 @@ class ParseSamplingMeasureTests(TestCase):
         sampler = m.sp.Contention()
         self.nonuniform_test(sampler)
         
-    def test_cycle_proof_rerooting_nonuniform(self):
-        sampler = m.sp.CycleProofRerooting()
-        self.nonuniform_test(sampler)
-
-    def test_cpwr2_nonuniform(self):
-        sampler = m.sp.CycleProofRerooting2()
-        self.nonuniform_test(sampler)
-
-    def test_root_reset_nonuniform(self):
-        sampler = m.sp.RootReset()
+    def test_cycle_proof_rooting_nonuniform(self):
+        sampler = m.sp.CycleProofRooting()
         self.nonuniform_test(sampler)
 
 
