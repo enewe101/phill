@@ -240,7 +240,6 @@ class CycleProofRooting:
 
     def sample(self, tokens_batch, embedding, mask=False):
 
-        m.timer.start()
         num_sentences, num_tokens = tokens_batch.shape
 
         # Track which nodes are "rooted" (have a path to ROOT), and which nodes 
@@ -307,7 +306,6 @@ class CycleProofRooting:
 
             ptr = new_ptr
 
-        m.timer.log("other")
         return head_ptrs
 
 
