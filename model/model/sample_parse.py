@@ -5,6 +5,15 @@ import model as m
 
 
 
+"""tensor([0.0154, 0.0155, 0.0152, 0.0159, 0.0159, 0.0160, 0.0157, 0.0155, 0.0155,
+        0.0158, 0.0156, 0.0156, 0.0152, 0.0159, 0.0157, 0.0158, 0.0156, 0.0155,
+        0.0152, 0.0151, 0.0159, 0.0153, 0.0162, 0.0158, 0.0155, 0.0156, 0.0159,
+        0.0153, 0.0156, 0.0157, 0.0160, 0.0162, 0.0154, 0.0159, 0.0156, 0.0161,
+        0.0150, 0.0153, 0.0154, 0.0160, 0.0155, 0.0155, 0.0155, 0.0157, 0.0155,
+        0.0160, 0.0154, 0.0157, 0.0161, 0.0156, 0.0156, 0.0157, 0.0153, 0.0155,
+        0.0157, 0.0161, 0.0163, 0.0153, 0.0158, 0.0147, 0.0160, 0.0152, 0.0155,
+        0.0157])"""
+
 class Contention():
 
     def sample(self, tokens_batch, embedding, mask=False):
@@ -16,7 +25,7 @@ class Contention():
         """
 
         num_sentences, num_tokens = tokens_batch.shape
-        energy = embedding.sentence_link_energy(tokens_batch)
+        energy = embedding.sentence_link_energy(tokens_batch, mask)
         head_selector = torch.distributions.Categorical(torch.exp(energy))
 
         heads = head_selector.sample()
@@ -24,16 +33,20 @@ class Contention():
         while True:
             i += 1
 
+            m.timer.start()
             # Find contentions: cycles or multiple roots.
             has_cycle = self.has_cycle(heads)
-            is_multiple_root = self.is_multiple_root(heads)
-
-            # Break once all sentences have no contentions.
-            if (has_cycle.sum() + is_multiple_root.sum()) == 0:
-                break
+            m.timer.log('cycle-check')
+            is_multiple_root = self.is_multiple_root(heads, mask)
+            m.timer.log('root-check')
 
             # Resample nodes involved in contentions.
             has_contention = has_cycle.logical_or(is_multiple_root)
+
+            # Break once all sentences have no contentions.
+            print(has_contention.sum())
+            if not has_contention.any():
+                break
 
             # Try selecting only one contentious element per sentence.
             # (For sentences without contention, harmlessly select <ROOT>.
@@ -42,6 +55,7 @@ class Contention():
 
             heads_sample = head_selector.sample()
             heads = torch.where(contenders, heads_sample, heads)
+            m.timer.log('other')
 
         return heads
 
@@ -59,39 +73,36 @@ class Contention():
         return contenders
 
 
-    def is_multiple_root(self, heads):
-        # <ROOT> is self-linked, so having multiple non-<ROOT> nodes linked
-        # to <ROOT> occurs when we have 3 or more nodes linked to <ROOT>.
-        has_multiple_roots = ((heads == 0).sum(dim=1) > 2).unsqueeze(1)
-        is_rooted = (heads == 0)
-        is_rooted[:,0] = False
-        return torch.where(has_multiple_roots, is_rooted, False)
-
+    def is_multiple_root(self, heads, mask):
+        # Get the non-PADDING tokens that have ROOT as head.
+        rooted = (heads == 0).logical_and(mask.logical_not())
+        # Eliminate ROOT itself
+        rooted[:,0] = False
+        # Determine which sentences have more than one root.
+        has_multiple_roots = rooted.sum(dim=1, keepdim=True) > 1
+        return torch.where(has_multiple_roots, rooted, False)
 
     def has_cycle(self, heads):
         """
         A node is on a loop if it can reach itself by taking enough hops
-        along directed edges.  To find the nodes that participate in cycles,
-        continually "make hops" by taking higher and higher powers of the 
-        adjacency matrix (built from ``heads``).
-        I.e., A tells you what node j can be reached from i in one hop, while
-        A^2 tells nodes j reachable in two hops from i.  
-        if you take A + A^2 + A^3 + ... A^n, where n is the number of tokens
-        in the sentence, then even the longest loop will visit all its members.
-        So, the diagonal of sum_n(A^n) tells you which nodes participate in 
-        loops.
+        along directed edges.  Recursively index heads with itself, to 
+        visit all ancestors of each node, and look for a node itself among
+        it's ancestors.  If seen, this node is in a cycle.
         """
         max_steps = heads.shape[1]
-        adjacency = torch.nn.functional.one_hot(
-            heads, heads.shape[1]).to(torch.int)
-        seen_heads = adjacency
+        has_cycle = torch.full(heads.shape, False)
+        self_head = torch.arange(
+            heads.shape[1]).unsqueeze(0).expand(heads.shape)
+        ancestors = heads.clone()
         for i in range(max_steps):
-            seen_heads = (
-                seen_heads.logical_or(seen_heads @ adjacency).to(torch.int))
+            has_cycle = has_cycle.logical_or(ancestors == self_head)
+            ancestors = heads.gather(dim=1, index=ancestors)
 
-        has_cycle = seen_heads.diagonal(dim1=1, dim2=2)
+        # ROOT is trivially cycled due to self-link, but we don't care about it.
         has_cycle[:,0] = 0
         return has_cycle
+        
+
         
 
 class ParityTokenResampler:
