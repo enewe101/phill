@@ -23,3 +23,23 @@ cycle-check : 6.312755823135376
 root-check  : 1.0899336338043213
 other       : 9.214428663253784
 
+masked-gather-s200000
+cycle-check : 3.191465377807617
+root-check  : 0.530674934387207
+other       : 3.9508230686187744
+
+masked-gather-s200000
+cycle-check : 3.191465377807617
+root-check  : 0.530674934387207
+other       : 3.9508230686187744
+
+masked-gather-s200000
+cycle-check : 2.819014549255371
+root-check  : 0.4667398929595947
+other       : 3.4741318225860596
+
+masked-gather-s200000
+cycle-check : 2.819014549255371
+root-check  : 0.4667398929595947
+other       : 3.4741318225860596
+

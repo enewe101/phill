@@ -44,7 +44,6 @@ class Contention():
             has_contention = has_cycle.logical_or(is_multiple_root)
 
             # Break once all sentences have no contentions.
-            print(has_contention.sum())
             if not has_contention.any():
                 break
 

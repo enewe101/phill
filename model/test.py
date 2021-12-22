@@ -210,25 +210,19 @@ class Word2VecModelTest(TestCase):
 
     def test_sample_tokens(self):
 
-        # TODO: make this explicitly calculate mutation energies over the
-        # full vocabulary, rather than taking advantage of the fact that 
-        # we have a full-vocab sentence and using a call to sentence energy
-        # while passing mask = False.  Although it works, it is creating
-        # contention over what mask should do in that function, and it makes
-        # the intended functionality harder to understand.
         seed_random(0)
 
-        vocab = 10
+        vocab_size = 10
         num_sentences = 10000
-        Px = torch.tensor([1/vocab] * vocab)
-        embedding = m.EmbeddingLayer(vocab,4)
+        Px = torch.tensor([1/vocab_size] * vocab_size)
+        embedding = m.EmbeddingLayer(vocab_size,4)
         model = m.train.Word2VecModel(embedding, Px) 
         num_metropolis_hastings_steps = 20
 
         # By using the full vocabulary consecutively in one sentence, it will
         # be easier to count head selection frequencies later.
-        num_tokens = vocab
-        tokens_batch = torch.tensor([range(num_tokens)])
+        num_tokens = vocab_size
+        tokens_batch = torch.arange(num_tokens).unsqueeze(0)
         tokens_batch = tokens_batch.expand((num_sentences,-1))
         num_sentences, num_tokens = tokens_batch.shape
 
@@ -257,7 +251,7 @@ class Word2VecModelTest(TestCase):
 
         # non-<ROOT> tokens choose heads according to model probability
         # Count how often token j is chosen as head by token i
-        counts = torch.zeros(vocab, vocab)
+        counts = torch.zeros(vocab_size, vocab_size)
         token_position_index = torch.tensor(range(num_tokens))
         for i in range(num_sentences):
             counts[token_position_index,new_heads[i]] += 1
@@ -267,8 +261,11 @@ class Word2VecModelTest(TestCase):
 
         # Calculate the expected probability of each token chosing each head
         # We're assuming that sentence_link_energy works
-        energy = embedding.sentence_link_energy(
-            tokens_batch[0].unsqueeze(0),mask_root_diag=False).squeeze(0)
+        energy = (
+            embedding.U[tokens_batch[0]] @ embedding.V.T
+            + embedding.Ubias[tokens_batch[0]] + embedding.Vbias.T
+        )
+
         probs = torch.exp(energy)
 
         # We're expecting root to always choose root, and other tokens to never
@@ -385,7 +382,7 @@ class ParityTokenResamplerTest(TestCase):
             found_node_parities, expected_node_parities))
         
 
-    #@skip("Long test")
+    @skip("Long test")
     def test_parity_token_resampler(self):
 
         seed_random(0)
@@ -492,18 +489,23 @@ class ParityTokenResamplerTest(TestCase):
 class ContentionSamplerTest(TestCase):
 
     def test_has_cycle(self):
+
+        # The notion is that heads below arise from a masked sentence batch
+        # having the mask also shown below.  has_cycle() does not actually take
+        # the mask, but it should be correct on as-if masked input.
         heads = torch.tensor([
-            [0,2,3,4,0],
-            [0,2,3,2,0],
-            [0,2,3,1,1],
-            [0,3,4,2,1]
+            [0,2,3,4,0,0,0,0],
+            [0,2,3,2,0,0,0,0],
+            [0,2,3,1,1,0,0,0],
+            [0,3,4,2,1,0,0,0]
         ])
+        mask = torch.tensor([[0,0,0,0,0,1,1,1]]).expand(4,-1)
         expected_cycle = torch.tensor([
-            [0,0,0,0,0],
-            [0,0,1,1,0],
-            [0,1,1,1,0],
-            [0,1,1,1,1]
-        ])
+            [0,0,0,0,0,0,0,0],
+            [0,0,1,1,0,0,0,0],
+            [0,1,1,1,0,0,0,0],
+            [0,1,1,1,1,0,0,0]
+        ]).to(torch.bool)
 
         sampler = m.sp.Contention()
         found_cycle = sampler.has_cycle(heads)
@@ -513,22 +515,23 @@ class ContentionSamplerTest(TestCase):
 
     def test_is_multiple_root(self):
         heads = torch.tensor([
-            [0,2,3,4,0],
-            [0,0,3,4,0],
-            [0,2,0,0,1],
-            [0,0,0,0,2],
-            [0,0,0,0,0],
+            [0,2,3,4,0,0,0,0],
+            [0,0,3,4,0,0,0,0],
+            [0,2,0,0,1,0,0,0],
+            [0,0,0,0,2,0,0,0],
+            [0,0,0,0,0,0,0,0],
         ])
+        mask = torch.tensor([[0,0,0,0,0,1,1,1]]).expand(5,-1)
         expected_multiple_root = torch.tensor([
-            [0,0,0,0,0],
-            [0,1,0,0,1],
-            [0,0,1,1,0],
-            [0,1,1,1,0],
-            [0,1,1,1,1],
-        ])
+            [0,0,0,0,0,0,0,0],
+            [0,1,0,0,1,0,0,0],
+            [0,0,1,1,0,0,0,0],
+            [0,1,1,1,0,0,0,0],
+            [0,1,1,1,1,0,0,0],
+        ]).to(torch.bool)
 
         sampler = m.sp.Contention()
-        found_multiple_root = sampler.is_multiple_root(heads)
+        found_multiple_root = sampler.is_multiple_root(heads, mask)
 
         self.assertTrue(torch.all(found_multiple_root == expected_multiple_root))
 
@@ -949,15 +952,13 @@ class EnergyTest(TestCase):
             embedding.link_energy(tokens_batch, heads_batch)
 
 
-    # TODO: update to test new kind of mask
     def test_sentence_link_energy(self):
         embedding = m.EmbeddingLayer(5,4)
         tokens_batch = torch.tensor([[2,0,3], [1,3,4]])
         num_sentences, num_tokens = tokens_batch.shape
 
-        # We're testing the function that calculates token-token link energies.
         found_energy = embedding.sentence_link_energy(
-            tokens_batch, mask_root_diag=False)
+            tokens_batch)
 
         # What were we expecting?  It should be the matrix product of the 
         # vectors and covectors plus the biases.  The covectors and covector-
@@ -968,12 +969,7 @@ class EnergyTest(TestCase):
         vb_t = embedding.Vbias[tokens_batch].transpose(1,2)
         expected_energy = U @ V_t + ub + vb_t
 
-        self.assertTrue(torch.equal(found_energy, expected_energy))
-
-        # Now try calculating energy where root always self-links and 
-        # no other token chooses itself.
-        found_energy = embedding.sentence_link_energy(
-            tokens_batch, mask_root_diag=True)
+        # ROOT always self-links and other tokens never head themselves.
         diagonal = torch.zeros(
             (num_tokens, num_tokens)).fill_diagonal_(-torch.inf)
         expected_energy += diagonal
