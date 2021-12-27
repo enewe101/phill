@@ -1,5 +1,6 @@
-from collections import defaultdict, Counter
+import os
 import pdb
+from collections import defaultdict, Counter
 
 import torch
 from torch.utils.data import Dataset
@@ -60,11 +61,21 @@ class LengthGroupedDataset(Dataset):
 
     def __init__(self, path):
         self.path = path
+        self.dictionary = None
+        self.read()
 
+
+    def tokens_path(self):
+        return os.path.join(self.path, "tokens.dict")
+
+    def sentences_path(self):
+        return os.path.join(self.path, "sentences.index")
 
     def read(self):
-        token_chunks, head_chunks, relation_chunks, Px = read_conllu(self.path)
-        self.Px = Px
+
+        self.dictionary = m.Dictionary(self.tokens_path())
+        chunks = read_conllu(self.sentences_path())
+        token_chunks, head_chunks, relation_chunks, self.Px = chunks
 
         # Tensorify the chunks grouping tokens, heads, and labels together
         # based on sentence length
@@ -94,11 +105,20 @@ class PaddedDataset(Dataset):
         self.padding = padding
         self.batch_size = batch_size
         self.min_length = min_length
+        self.dictionary = None
+        self.read()
 
+    def tokens_path(self):
+        return os.path.join(self.path, "tokens.dict")
+
+    def sentences_path(self):
+        return os.path.join(self.path, "sentences.index")
 
     def read(self):
-        token_chunks, head_chunks, relation_chunks, Px = read_conllu(self.path)
-        self.Px = Px
+
+        self.dictionary = m.Dictionary(self.tokens_path())
+        chunks = read_conllu(self.sentences_path())
+        token_chunks, head_chunks, relation_chunks, self.Px = chunks
         self.data = []
 
         tokens_batch, heads_batch, relations_batch = [],[],[]
@@ -119,7 +139,6 @@ class PaddedDataset(Dataset):
         if len(tokens_batch) > 0:
             self.pad_append(
                 length, tokens_batch, heads_batch, relations_batch)
-
 
     def pad_append(self, length, tokens_batch, heads_batch, relations_batch):
         padding_mask = self.get_padding_mask(length, tokens_batch)
@@ -151,5 +170,25 @@ class PaddedDataset(Dataset):
 
     def __len__(self):
         return len(self.data)
+
+
+def view_dataset(data_path=m.const.DEFAULT_GOLD_DATA_DIR):
+    data = m.SentenceDataset(os.path.join(data_path, "sentences.index"))
+    token_dictionary = m.Dictionary(os.path.join(data_path, "tokens.dict"))
+    relation_dictionary = m.Dictionary(os.path.join(data_path, "relations.dict"))
+
+    pdb.set_trace()
+    for tokens_batch, heads_batch, relations_batch in data:
+        for i in range(tokens_batch.shape[0]):
+            token_ids = tokens_batch[i,:]
+            tokens = token_dictionary.get_tokens(token_ids)
+            relation_ids = relations_batch[i,:]
+            relations = relation_dictionary.get_tokens(relation_ids)
+            print(tokens)
+            print(heads_batch[i,:])
+            print(relations)
+            pdb.set_trace()
+
+
 
 

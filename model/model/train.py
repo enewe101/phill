@@ -5,118 +5,159 @@ import time
 from collections import defaultdict
 
 import torch
-from torch.nn.functional import one_hot
 
 import model as m
 
 
-SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-DATA_DIR = os.path.join(SCRIPT_DIR, "../../../data/processed/all-train")
-
-
-def train1(data_path=DATA_DIR):
-
-    # Load a dataset
-    data = m.LengthGroupedDataset(os.path.join(data_path, "sentences.index"))
-    data.read()
-    dictionary = m.Dictionary(os.path.join(data_path, "tokens.dict"))
-
-    # Initialize model
-    embedding_dimension = 500
-    embedding = m.EmbeddingLayer(len(dictionary), embedding_dimension)
-    model = LanguageModel(embedding)
-
-    # Draw a positive batch from the dataset
-    for tokens_batch, heads_batch, relations_batch in data:
-
-        sample_parses = model.sample_parses(tokens_batch)
-        parse_energy = embedding.parse_energy(tokens_batch, sample_parses)
-
-        # resample tokens and get a negative sample and measure its energy
-        # and calculate loss...
-
-
-def train_w2v(data_path=DATA_DIR):
+def train_flat():
 
     lr = 1e-2
     num_epochs = 100
     batch_size = 100
+    embed_dim = 300
 
-    # Load a dataset
-    #data = m.LengthGroupedDataset(os.path.join(data_path, "sentences.index"))
-    sentences_path = os.path.join(data_path, "sentences.index")
+    # TODO: Can padding be zero like elsewhere?
+    # Get the data, model, and optimizer.
     data = m.PaddedDataset(
-        sentences_path, padding=-1, batch_size=batch_size, min_length=3)
-    data.read()
-    dictionary = m.Dictionary(os.path.join(data_path, "tokens.dict"))
+        m.const.DEFAULT_GOLD_DATA_DIR, padding=-1,
+        batch_size=batch_size, min_length=3
+    )
+    model = m.FlatModel(len(data.dictionary), embed_dim, data.Px)
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 
-    # Initialize model
-    embedding_dimension = 300
-    embedding = m.EmbeddingLayer(len(dictionary), embedding_dimension)
-    model = Word2VecModel(embedding, data.Px)
-    optimizer = torch.optim.SGD(embedding.parameters(), lr=lr)
+    # Train the model on the data with the optimizer.
+    train_model(model, data, optimizer, num_epochs)
 
-    # Draw a positive batch from the dataset
-    m.timer.start()
+    pdb.set_trace()
+    return model
+
+
+def train_edge(load_existing_path=None):
+
+    lr = 1e-2
+    temp = 20
+    num_epochs = 100
+    batch_size = 100
+    embed_dim = 200
+
+    # TODO: Can padding be zero like elsewhere?
+    # Get the data, model, and optimizer.
+    data = m.PaddedDataset(
+        m.const.DEFAULT_GOLD_DATA_DIR, batch_size=batch_size)
+
+    if load_existing_path is not None:
+        model = m.EdgeModel.load(load_existing_path, data.Px)
+    else:
+        model = m.EdgeModel(len(data.dictionary), embed_dim, data.Px)
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+
+    # Train the model on the data with the optimizer.
+    train_model(model, data, optimizer, num_epochs)
+
+    pdb.set_trace()
+    return model
+
+
+def view_edge():
+
+    data = m.PaddedDataset(m.const.DEFAULT_GOLD_DATA_DIR, min_length=8)
+    tokens_batch, head_ptrs_batch, relations_batch, mask_batch = data[0]
+
+    params_subpath = "../test-data/model-params"
+    params_dir = os.path.join(m.const.SCRIPT_DIR, params_subpath)
+    model_up_path = os.path.join(params_dir, "edge-params.pt")
+    model_up = m.EdgeModel.load(model_up_path, data.Px)
+    model_head_ptrs_batch_up = model_up.sample_parses(
+        tokens_batch, mask_batch, start_temp=1, temp_step=0.001)
+
+    model_down_path = os.path.join(params_dir, "edge-params200.pt")
+    model_down = m.EdgeModel.load(model_down_path, data.Px)
+    model_head_ptrs_batch_down = model_down.sample_parses(
+        tokens_batch, mask_batch, start_temp=1, temp_step=0.001)
+
+    tokens_batch = remove_padding(tokens_batch, mask_batch)
+    model_head_ptrs_batch_up = remove_padding(
+        model_head_ptrs_batch_up, mask_batch)
+    model_head_ptrs_batch_down = remove_padding(
+        model_head_ptrs_batch_down, mask_batch)
+
+    head_ptrs_batch = remove_padding(head_ptrs_batch, mask_batch)
+
+    m.viz.print_trees(
+        tokens_batch, 
+        model_head_ptrs_batch_up,
+        model_head_ptrs_batch_down,
+        #head_ptrs_batch,
+        data.dictionary,
+        out_path=m.const.HTML_DIR
+    )
+
+
+def remove_padding(padded_batch, mask_batch):
+    padded_batch = padded_batch.tolist()
+    mask_batch = mask_batch.tolist()
+    for i in range(len(padded_batch)):
+        mask_size = sum(mask_batch[i])
+        if mask_size > 0:
+            padded_batch[i] = padded_batch[i][:-mask_size]
+    return padded_batch
+
+
+def train_model(model, data, optimizer, num_epochs):
+
     for epoch in range(num_epochs):
         print("epoch:", epoch)
         epoch_loss = torch.tensor(0.)
 
         for batch_num, (tokens_batch, _, _, mask)  in enumerate(data):
+            sys.stdout.write("\b" * 100)
             sys.stdout.write(str(batch_num))
+            sys.stdout.write(":"+str(tokens_batch.shape[1]))
             sys.stdout.flush()
 
-            with torch.no_grad():
-                m.timer.log("setup")
-                positive_heads = model.sample_parses(tokens_batch)
-                negative_heads = model.sample_tokens(
-                    tokens_batch, positive_heads)
-                m.timer.log("sample")
-
-            mask = (tokens_batch == -1)
-            mask[:,0] = True
-
-            loss = -torch.where(
-                mask,
-                torch.tensor([[0]], dtype=torch.float),
-                embedding.link_energy(tokens_batch, positive_heads) -
-                embedding.link_energy(tokens_batch, negative_heads) 
-            ).sum()
+            loss = model.get_loss(tokens_batch, mask)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            m.timer.log("grad")
 
             with torch.no_grad():
                 epoch_loss += loss/(tokens_batch.shape[0]*tokens_batch.shape[1])
 
-            sys.stdout.write("\b" * len(str(batch_num)))
-
-        print("\n" + m.timer.repr())
-
-        words = [
-            "apparently", "would", "gave", "said",
-            "lawyer", "the", "fast", "Washington"
-        ]
         with torch.no_grad():
-            for word in words:
-                word_id = dictionary.get_id(word)
-                heads = dictionary.get_tokens(embedding.head_match(word_id, 5))
-                similars = dictionary.get_tokens(embedding.similar(word_id, 5))
-                print(word, "|", " ".join(heads), "|", " ".join(similars))
+            print_model(model, data.dictionary)
 
         print(epoch_loss)
 
-    print(m.timer.repr())
-    run_code = get_run_code(
-        batch_size, num_epochs, embedding_dimension, "conllu")
-    m.timer.write("w2v-timer", run_code)
-    torch.save(
-        (embedding.U, embedding.Ubias, embedding.V, embedding.Vbias),
-        run_code+".pt"
-    )
-    pdb.set_trace()
-    return model
+
+def print_model(model, dictionary, start_temp=1, temp_step=0.001):
+    words = [
+        "apparently", "would", "gave", "said",
+        "lawyer", "the", "fast", "Washington"
+    ]
+    for word in words:
+        word_id = dictionary.get_id(word)
+        heads = dictionary.get_tokens(model.embedding.head_match(word_id, 5))
+        similars = dictionary.get_tokens(model.embedding.similar(word_id, 5))
+        print(word, "|", " ".join(heads), "|", " ".join(similars))
+
+    display_parse(
+        "<ROOT> I gave the documents to my lawyer .".split(),
+        dictionary, model, start_temp, temp_step)
+    display_parse(
+        "<ROOT> Could you buy some pet food ?".split(),
+        dictionary, model, start_temp, temp_step)
+    display_parse(
+        "<ROOT> Before law school , she studied computer science at MIT".split(),
+        dictionary, model, start_temp, temp_step)
+
+
+def display_parse(sentence, dictionary, model, start_temp, temp_step):
+    ids = torch.tensor([dictionary.get_ids(sentence)])
+    mask = torch.tensor([[False]*len(sentence)])
+    heads = model.sample_parses(ids, mask, start_temp, temp_step)
+    print_tree(heads[0].tolist(), sentence)
+
+
 
 
 def get_run_code(batch_size, num_epochs, embedding_dimension, corpus):
@@ -128,8 +169,10 @@ def get_run_code(batch_size, num_epochs, embedding_dimension, corpus):
         f"-{corpus}"
     )
 
-def print_tree(headlist, curnode=0, depth=0):
-    print('  ' * depth + str(curnode))
+
+def print_tree(headlist, tokens=None, curnode=0, depth=0):
+    string = str(curnode) if tokens is None else tokens[curnode]
+    print('  ' * depth + string)
     children = [
         i for i, val in enumerate(headlist) 
         if val == curnode
@@ -140,156 +183,10 @@ def print_tree(headlist, curnode=0, depth=0):
         if child == 0:
             continue
 
-        print_tree(headlist, curnode=child, depth=depth+1)
-
-
-
-class GraphParseModel:
-
-    def __init__(self):
-        self.embedding = embedding_layer
-        self.kernel = [torch.tensor(v) for v in [0,5,4,3,2,1]]
-        self.set_Px(Px)
-        self.unigram_sampler = torch.distributions.Categorical(self.Px)
-
-
-
-class Word2VecModel:
-
-    def __init__(self, embedding_layer, Px):
-        self.embedding = embedding_layer
-        self.kernel = [torch.tensor(v) for v in [0,5,4,3,2,1]]
-        self.set_Px(Px)
-        self.unigram_sampler = torch.distributions.Categorical(self.Px)
-
-
-    def set_Px(self, Px):
-        self.Px = Px
-        # We never sample the <ROOT> token.
-        self.Px[0] = 0
-
-
-    def get_head_probs(self, num_tokens):
-        head_probs = torch.zeros((num_tokens, num_tokens))
-        for i,v in enumerate(self.kernel):
-            # Handle sentences shorter than kernel properly.
-            if i > num_tokens:
-                break
-            diag = torch.full((num_tokens-i,), v).diagflat(i)
-            head_probs += diag
-        head_probs += head_probs.T.clone()
-        head_probs[:,0] = 0
-        head_probs[0] = one_hot(torch.tensor(0), num_tokens)
-        return head_probs
-
-
-    def sample_parses(self, tokens_batch):
-        num_sentences, num_tokens = tokens_batch.shape
-
-        # Construct a head selector, which provides the probability
-        # of a token in position i selecting a token in position j as it's
-        # head.  For w2v, this is like a convolution; choosing tokens nearby
-        # is most likely and is zero beyond the kernel.
-        head_probs = self.get_head_probs(num_tokens)
-        head_probs.unsqueeze(0).expand(500,-1,-1)
-
-        # Tokens should not choose padding as head.
-        head_probs = torch.where(
-            tokens_batch.unsqueeze(1)==-1,
-            torch.tensor([[[0]]], dtype=torch.float),
-            head_probs.unsqueeze(0)
-        )
-
-        # Padding should always choose <ROOT> as head.
-        head_probs = torch.where(
-            tokens_batch.unsqueeze(2)==-1,
-            one_hot(torch.tensor(0), num_tokens).to(torch.float).unsqueeze(0),
-            head_probs
-        )
-
-        head_selector = torch.distributions.Categorical(head_probs)
-
-        # Sample pointers that indicate in each sentence and at each token
-        # position, what position was selected to act as that token's head
-        head_pointers = torch.where(
-            tokens_batch == -1,
-            torch.tensor([[0]]),
-            head_selector.sample()
-        )
-
-        # Convert head pointers into actual token ids (was positions).
-        heads = tokens_batch.gather(dim=1, index=head_pointers)
-
-        return heads
-
-
-    def sample_tokens(self, tokens_batch, prev_heads):
-        num_sentences, num_tokens = tokens_batch.shape
-
-        # Sample 1 head for each word in each sentence.
-        next_heads = self.unigram_sampler.sample(tokens_batch.shape)
-
-        # Calculate link energies for initial heads batch and for the next.
-        prev_weights = self.embedding.link_energy(tokens_batch, prev_heads)
-        next_weights = self.embedding.link_energy(tokens_batch, next_heads)
-
-        proposal_weights = (self.Px[prev_heads]/self.Px[next_heads])
-
-        accept_score = proposal_weights * torch.exp(next_weights - prev_weights)
-        reject_score = torch.rand(tokens_batch.shape)
-        accept_proposal = accept_score > reject_score
-
-        # <ROOT> and padding always reject, keeping <ROOT> as their head
-        accept_proposal = torch.where(
-            tokens_batch == -1,
-            torch.tensor([[False]]),
-            accept_proposal
-        )
-        accept_proposal[:,0] = False
-
-        next_heads = torch.where(accept_proposal, next_heads, prev_heads)
-        return next_heads
-
-
-
-class LanguageModel:
-
-    def __init__(self, embedding_layer): 
-        self.embedding = embedding_layer
-
-    def sample_parses(self, tokens_batch):
-        #return m.sp.sample_parses(self, tokens_batch)
-        #return m.sp.sample_parses_new(self, tokens_batch)
-        sampler = m.sp.ContentionResampler()
-        return sampler.sample(tokens_batch, self.embedding)
-
-    def gibbs_step_tokens():
-        # Resample some of the words
-        pass
-
-
-
-def view_dataset(data_path=DATA_DIR):
-    data = m.SentenceDataset(os.path.join(data_path, "sentences.index"))
-    data.read()
-    token_dictionary = m.Dictionary(os.path.join(data_path, "tokens.dict"))
-    relation_dictionary = m.Dictionary(os.path.join(data_path, "relations.dict"))
-
-    pdb.set_trace()
-    for tokens_batch, heads_batch, relations_batch in data:
-        for i in range(tokens_batch.shape[0]):
-            token_ids = tokens_batch[i,:]
-            tokens = token_dictionary.get_tokens(token_ids)
-            relation_ids = relations_batch[i,:]
-            relations = relation_dictionary.get_tokens(relation_ids)
-            print(tokens)
-            print(heads_batch[i,:])
-            print(relations)
-            pdb.set_trace()
-
-
+        print_tree(headlist, tokens, curnode=child, depth=depth+1)
 
 
 if __name__ == "__main__":
-    sd = m.SentenceDataset("../data/processed/en_ewt-ud-train/sentences.index")
-    sd.read()
+    view_edge()
+
+

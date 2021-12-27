@@ -37,7 +37,7 @@ class EmbeddingLayer(nn.Module):
         return self.link_energy(tokens_batch, heads_batch).sum()
 
 
-    def link_energy(self, tokens_batch, heads_batch, mask=False):
+    def link_energy(self, tokens_batch, heads_batch, mask=False, temp=1):
         """
         Generates the token-link energies between pairs of tokens, one from
         tokens, one from heads, which are parallel tensors.  The tensors must
@@ -52,14 +52,10 @@ class EmbeddingLayer(nn.Module):
         ) + self.Ubias[tokens_batch] + self.Vbias[heads_batch]).squeeze(last_dim)
 
         energies[mask] = 0
-        return energies
+        return energies / temp
 
 
-    def sentence_link_energy(
-        self,
-        tokens_batch,
-        mask=None,
-    ):
+    def sentence_link_energy(self, tokens_batch, mask=None, temp=1):
         num_sentences, num_tokens = tokens_batch.shape
 
         U = self.U[tokens_batch]
@@ -86,7 +82,8 @@ class EmbeddingLayer(nn.Module):
             energy[mask_sub_choice] = -torch.inf
             # Padding always chooses ROOT as a head
             energy[:,:,0][mask] = 0
-        return energy
+
+        return energy / temp
 
 
     def forward(self, tokens_batch, heads_batch):

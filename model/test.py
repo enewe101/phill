@@ -15,11 +15,30 @@ import model as m
 
 PAD = 0
 TEST_DATA_PATH = os.path.join(os.path.dirname(__file__), "test-data")
+SCRATCH_DATA_PATH = os.path.join(TEST_DATA_PATH, "scratch")
 
 def seed_random(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+
+class TestVisualization(TestCase):
+
+    def test_visualization(self):
+        data_path = os.path.join(TEST_DATA_PATH, "ten-sentence-dataset")
+        data = m.PaddedDataset(data_path)
+        tokens_batch, head_ptrs_batch, relations_batch, mask_batch = data[0]
+        tokens_batch = tokens_batch.tolist()
+        head_ptrs_batch = head_ptrs_batch.tolist()
+        mask_batch = mask_batch.tolist()
+        for i in range(len(tokens_batch)):
+            num_masked = sum(mask_batch[i])
+            tokens_batch[i] = tokens_batch[i][:-num_masked]
+            head_ptrs_batch[i] = head_ptrs_batch[i][:-num_masked]
+        m.viz.print_trees(
+            tokens_batch, head_ptrs_batch, data.dictionary, SCRATCH_DATA_PATH)
 
 
 class DatasetTest(TestCase):
@@ -118,7 +137,7 @@ class Word2VecModelTest(TestCase):
 
         Px = torch.tensor([1/100] * 100)
         embedding = m.EmbeddingLayer(100,4)
-        model = m.train.Word2VecModel(embedding, Px) 
+        model = m.FlatModel(embedding, Px) 
         tokens_batch = torch.tensor([
             [0,90, 91,92,93,94,95,96,97,98], 
             [0,80,81,82,83,84,85,86,87,88]
@@ -160,7 +179,7 @@ class Word2VecModelTest(TestCase):
 
         Px = torch.tensor([1/100] * 100)
         embedding = m.EmbeddingLayer(100,4)
-        model = m.train.Word2VecModel(embedding, Px) 
+        model = m.FlatModel(embedding, Px) 
         tokens_batch = torch.tensor([[0,90, 91,92,93,94,95,96,97,98]])
         tokens_batch = tokens_batch.expand((2000,-1))
         num_sentences, num_tokens = tokens_batch.shape
@@ -216,7 +235,7 @@ class Word2VecModelTest(TestCase):
         num_sentences = 10000
         Px = torch.tensor([1/vocab_size] * vocab_size)
         embedding = m.EmbeddingLayer(vocab_size,4)
-        model = m.train.Word2VecModel(embedding, Px) 
+        model = m.FlatModel(embedding, Px) 
         num_metropolis_hastings_steps = 20
 
         # By using the full vocabulary consecutively in one sentence, it will
@@ -229,7 +248,7 @@ class Word2VecModelTest(TestCase):
         kernel = torch.tensor([0,5,4,3,2,1])
         probs = self.calculate_expected_head_probs(kernel, num_tokens)
         sampler = torch.distributions.Categorical(probs)
-        samples = sampler.sample((num_sentences,))
+        samples = sampler.sample_tokens((num_sentences,))
 
         heads = tokens_batch.gather(dim=1,index=samples)
         new_heads = heads.clone()
@@ -280,7 +299,7 @@ class Word2VecModelTest(TestCase):
         self.assertTrue(torch.allclose(counts, probs, atol=1e-2))
 
 
-class ParityTokenResamplerTest(TestCase):
+class ParityTokenSamplerTest(TestCase):
 
     def test_get_node_parity(self):
         """
@@ -303,7 +322,7 @@ class ParityTokenResamplerTest(TestCase):
 
         # Build the sampler, and read the batch from the dataset.  Adjust
         # padding
-        sampler = m.sp.ParityTokenResampler(dataset.Px)
+        sampler = m.sp.ParityTokenSampler(dataset.Px)
         tokens_batch, head_ptrs_batch, relations_batch, mask = dataset[0]
         mask = (head_ptrs_batch == -1)
         head_ptrs_batch[mask] = 0
@@ -415,7 +434,7 @@ class ParityTokenResamplerTest(TestCase):
         # Sampling a smaller vocabulary gives faster convergence.
         restricted_vocab = 26 # full vocab of ten-sentence-dataset is 145
         Px_restricted_vocab = dataset.Px[:restricted_vocab]
-        token_sampler = m.sp.ParityTokenResampler(Px_restricted_vocab)
+        token_sampler = m.sp.ParityTokenSampler(Px_restricted_vocab)
 
         # Continually resample the sentence.  Every resampling generates
         # two mutated sentences, one with "even" tokens mutated and one with
@@ -507,7 +526,7 @@ class ContentionSamplerTest(TestCase):
             [0,1,1,1,1,0,0,0]
         ]).to(torch.bool)
 
-        sampler = m.sp.Contention()
+        sampler = m.sp.ContentionParseSampler()
         found_cycle = sampler.has_cycle(heads)
 
         self.assertTrue(torch.all(found_cycle == expected_cycle))
@@ -530,7 +549,7 @@ class ContentionSamplerTest(TestCase):
             [0,1,1,1,1,0,0,0],
         ]).to(torch.bool)
 
-        sampler = m.sp.Contention()
+        sampler = m.sp.ContentionParseSampler()
         found_multiple_root = sampler.is_multiple_root(heads, mask)
 
         self.assertTrue(torch.all(found_multiple_root == expected_multiple_root))
@@ -704,11 +723,11 @@ class QuadTreeCounter:
 class ParseSamplingMeasureTests(TestCase):
 
     def test_contention_uniform(self):
-        sampler = m.sp.Contention()
+        sampler = m.sp.ContentionParseSampler()
         self.uniform_test(sampler)
 
     def test_cycle_proof_rooting_uniform(self):
-        sampler = m.sp.CycleProofRooting()
+        sampler = m.sp.CycleProofRootingParseSampler()
         self.uniform_test(sampler)
 
     def uniform_test(self, sampler):
@@ -738,7 +757,7 @@ class ParseSamplingMeasureTests(TestCase):
         tree_counter = QuadTreeCounter()
 
         # Count the occurrences of each tree generated by the model
-        trees = sampler.sample(tokens_batch, embedding, mask)
+        trees = sampler.sample_parses(tokens_batch, embedding, mask)
         # First, ensure no parse has tokens choosing padding as head.
         self.assertTrue(torch.all(trees[mask.logical_not()]<=4))
         # First, ensure padding always chooses ROOT.
@@ -761,11 +780,11 @@ class ParseSamplingMeasureTests(TestCase):
         ))
 
     def test_contention_nonuniform(self):
-        sampler = m.sp.Contention()
+        sampler = m.sp.ContentionParseSampler()
         self.nonuniform_test(sampler)
         
     def test_cycle_proof_rooting_nonuniform(self):
-        sampler = m.sp.CycleProofRooting()
+        sampler = m.sp.CycleProofRootingParseSampler()
         self.nonuniform_test(sampler)
 
 
@@ -808,7 +827,7 @@ class ParseSamplingMeasureTests(TestCase):
 
         # Generate trees from the model, and count them.
         start = time.time()
-        found_trees = sampler.sample(
+        found_trees = sampler_parses.sample(
             tokens_batch.expand(num_sentences, -1), embedding, mask)
 
         elapsed = time.time() - start
@@ -977,6 +996,8 @@ class EnergyTest(TestCase):
 
 
 if __name__ == "__main__":
+    if not os.path.exists(SCRATCH_DATA_PATH):
+        os.makedirs(SCRATCH_DATA_PATH)
     main()
 
 

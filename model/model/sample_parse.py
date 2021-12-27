@@ -5,18 +5,9 @@ import model as m
 
 
 
-"""tensor([0.0154, 0.0155, 0.0152, 0.0159, 0.0159, 0.0160, 0.0157, 0.0155, 0.0155,
-        0.0158, 0.0156, 0.0156, 0.0152, 0.0159, 0.0157, 0.0158, 0.0156, 0.0155,
-        0.0152, 0.0151, 0.0159, 0.0153, 0.0162, 0.0158, 0.0155, 0.0156, 0.0159,
-        0.0153, 0.0156, 0.0157, 0.0160, 0.0162, 0.0154, 0.0159, 0.0156, 0.0161,
-        0.0150, 0.0153, 0.0154, 0.0160, 0.0155, 0.0155, 0.0155, 0.0157, 0.0155,
-        0.0160, 0.0154, 0.0157, 0.0161, 0.0156, 0.0156, 0.0157, 0.0153, 0.0155,
-        0.0157, 0.0161, 0.0163, 0.0153, 0.0158, 0.0147, 0.0160, 0.0152, 0.0155,
-        0.0157])"""
+class ContentionParseSampler():
 
-class Contention():
-
-    def sample(self, tokens_batch, embedding, mask=False):
+    def sample_parses(self, tokens_batch, embedding, mask=False):
         """
         The approach here is to randomly select all heads, and then resolve any
         issues by reselecting heads for all tokens involved in said issues.
@@ -100,7 +91,7 @@ class Contention():
 
         
 
-class ParityTokenResampler:
+class ParityTokenSampler:
 
     MIN_DEPTH = 7
 
@@ -141,7 +132,7 @@ class ParityTokenResampler:
         return node_parity
 
 
-    def sample_tokens(self, tokens_batch, head_ptrs, embedding, mask=False):
+    def sample_tokens(self, tokens_batch, head_ptrs, embedding, mask):
         num_sentences, num_tokens = tokens_batch.shape
 
         # Randomly nodes from the unigram distribution (except at mask).
@@ -156,13 +147,12 @@ class ParityTokenResampler:
         # 1) Where heads and subordinates are not mutated
         # 2) Where heads are mutated.
         # 3) Where subordinates are mutated.
-        with torch.no_grad():
-            normal_energy = embedding.link_energy(
-                tokens_batch, heads, mask)
-            mutant_head_energy = embedding.link_energy(
-                tokens_batch, mutant_heads, mask)
-            mutant_sub_energy = embedding.link_energy(
-                mutants_batch, heads, mask)
+        normal_energy = embedding.link_energy(
+            tokens_batch, heads, mask)
+        mutant_head_energy = embedding.link_energy(
+            tokens_batch, mutant_heads, mask)
+        mutant_sub_energy = embedding.link_energy(
+            mutants_batch, heads, mask)
 
         # Calculate the energy for each possible point mutation.
         # At each position i, take the energy from either 
@@ -236,9 +226,11 @@ class ParityTokenResampler:
         return tokens_mutated
 
 
-class CycleProofRooting:
+class CycleProofRootingParseSampler:
 
-    def sample(self, tokens_batch, embedding, mask=False):
+    def sample_parses(
+        self, tokens_batch, embedding, mask, start_temp=1, temp_step=0.1
+    ):
 
         num_sentences, num_tokens = tokens_batch.shape
 
@@ -256,7 +248,6 @@ class CycleProofRooting:
         head_ptrs[:,0] = 0
         # Heads are chosen randomly with probability based on link energy.
         energy = embedding.sentence_link_energy(tokens_batch, mask)
-        head_probs = torch.exp(energy)
 
         # Track the head of the sentence (the token whose head is ROOT)
         # Default value 0 indicates that sentence head is not yet established.
@@ -268,8 +259,12 @@ class CycleProofRooting:
         # In each sentence, the "active" node chosen is considered in "rooting"  
         per_sentence = torch.arange(num_sentences)
         rooting[per_sentence,ptr.squeeze(1)] = True
+        temp = start_temp - temp_step
         while True:
 
+            temp += temp_step
+
+            head_probs = torch.exp(energy / temp)
             this_head_ptr = torch.distributions.Categorical(
                 head_probs[per_sentence, ptr.squeeze(1)]).sample().unsqueeze(1)
             head_ptrs[per_sentence, ptr.squeeze(1)] = this_head_ptr.squeeze(1)
