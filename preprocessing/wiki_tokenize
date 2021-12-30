@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# Run this on the "extracted" directory produced by wikiextractor
+# https://github.com/attardi/wikiextractor
+
+# Absolute path to this file.
+SCRIPTPATH="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+
+# The python script below uses NLTK to sentence-split and tokenize from stdin.
+tokenizer_script=$SCRIPTPATH/wiki_tokenize.py
+
+# Get a couple args:
+extracted_dir=$1	# Output dir from wikiextract containing e.g. AA, AB, etc.
+output_dir=$2
+
+# get all of the subdirectories of extractet_dir.
+# Note: trailing slash below .....v prevents files from listing.
+input_dirs=`ls -d $extracted_dir/*/`
+
+mkdir $output_dir 2> /dev/null
+
+for dir in $input_dirs
+do
+	subdir=`basename $dir`
+	echo $subdir
+
+	# Make matching directory structure in output dir.
+	mkdir $output_dir/$subdir 2> /dev/null
+
+	ls $dir | xargs -I@ -P8 -n1 bash -c \
+		"cat $dir@ | python $tokenizer_script > $output_dir/$subdir/@"
+
+done
