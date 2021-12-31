@@ -3,12 +3,14 @@ package main
 import (
 	"os"
 	"strings"
+	"strconv"
+	"fmt"
 )
 
 type Dictionary struct {
 	tokens2ids map[string]int
 	ids2tokens []string
-	counts []int32
+	counts []int64
 }
 
 func NewDictionary() *Dictionary {
@@ -21,32 +23,46 @@ func NewDictionary() *Dictionary {
 func(d *Dictionary) Write(path string) {
 	file, err := os.Create(path)
 	if err != nil {panic(err.Error())}
-	file.WriteString(strings.Join(d.ids2tokens, "\n"))
+	for id, token := range d.ids2tokens {
+		fmt.Fprintf(file, "%s\t%d\n", token, d.counts[id])
+	}
 	file.Close()
 }
 
 func ReadDictionary(path string) (*Dictionary, error) {
 	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	ids2tokens := strings.Split(string(data), "\n")
-	tokens2ids := make(map[string]int)
-	for i, token := range ids2tokens {
+	if err != nil {return nil, err}
+	lines := strings.Split(string(data), "\n")
+	ids2tokens := make([]string, len(lines))
+	tokens2ids := make(map[string]int, len(lines))
+	counts := make([]int64, len(lines))
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {continue}
+		split := strings.Split(line, "\t")
+		token := split[0]
+		count, err := strconv.ParseInt(split[1], 10, 64)
+		if err != nil {panic(err.Error())}
+		ids2tokens[i] = token
 		tokens2ids[token] = i
+		counts[i] = int64(count)
 	}
 	dictionary := NewDictionary()
 	dictionary.ids2tokens = ids2tokens
 	dictionary.tokens2ids = tokens2ids
+	dictionary.counts = counts
 	return dictionary, nil
 }
+
 
 func(d *Dictionary) Add(tokens ...string) {
 
 	for _, token := range tokens {
 		// Check if it's already there
 		id, ok := d.tokens2ids[token]
-		if ok {continue}
+		if ok {
+			d.counts[id] += 1
+			continue
+		}
 
 		// If not, add it.
 		d.ids2tokens = append(d.ids2tokens, token)
