@@ -4,21 +4,8 @@ import (
 	"io"
 	"os"
 	"bytes"
+	"sync"
 )
-
-func NewChunkerGroup(
-	file *os.File, chunk_size int64, peek_size int64, delim []byte,
-		num_chunkers int) []*Chunker {
-	var chunkers []*Chunker
-	num_chunkers_ := int64(num_chunkers)
-	for i:=int64(0); i<num_chunkers_; i++ {
-		chunker := NewChunker(file, chunk_size, peek_size, delim)
-		chunker.id = i
-		chunker.num_peers = num_chunkers_
-		chunkers = append(chunkers, &chunker)
-	}
-	return chunkers
-}
 
 func readAt(file *os.File, offset int64, length int64) ([]byte, error) {
 	buf := make([]byte, length)
@@ -33,30 +20,79 @@ func readAt(file *os.File, offset int64, length int64) ([]byte, error) {
 	return buf, err
 }
 
+
+func NewChunkerGroup(
+	inPath string,
+	chunkSize int64,
+	peekSize int64,
+	delim []byte,
+	numChunkers int) []*Chunker {
+
+	// Open the file.
+	file, err := os.Open(inPath)
+	if err != nil {panic(err.Error()+" ("+inPath+")")}
+
+	// Make the chunkers.
+	var chunkers []*Chunker
+	numChunkers64 := int64(numChunkers)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(numChunkers)
+	for i:=int64(0); i<numChunkers64; i++ {
+		chunker := NewChunker(
+			file, chunkSize, peekSize, delim,
+			i, numChunkers64, &waitGroup)
+		chunkers = append(chunkers, &chunker)
+	}
+
+	// Set a process to close the file once all chunkers are closed
+	go closeFileWhenDone(file, &waitGroup)
+	return chunkers
+}
+
+// Closes a file once all readers are done.
+func closeFileWhenDone(file *os.File, waitGroup *sync.WaitGroup) {
+	defer file.Close()
+	waitGroup.Wait()
+}
+
+
 type Chunker struct {
 	file *os.File
-	chunk_num int64
-	chunk_size int64
-	peek_size int64
+	chunkNum int64
+	chunkSize int64
+	peekSize int64
 	delim []byte
 	id int64
-	num_peers int64
+	numPeers int64
+	waitGroup *sync.WaitGroup
 }
 
 func NewChunker(
-	file *os.File, chunk_size int64, peek_size int64, delim []byte) Chunker {
+	file *os.File,
+	chunkSize int64,
+	peekSize int64,
+	delim []byte,
+	id int64,
+	numPeers int64,
+	waitGroup *sync.WaitGroup) Chunker {
 	return Chunker{
-		chunk_num: -1,
+		chunkNum: -1,
 		file: file,
-		chunk_size: chunk_size,
-		peek_size: peek_size,
+		chunkSize: chunkSize,
+		peekSize: peekSize,
 		delim: delim,
-		num_peers: 1}
+		id: id,
+		numPeers: numPeers,
+		waitGroup: waitGroup}
+}
+
+func(c *Chunker) Close() {
+	c.waitGroup.Done()
 }
 
 func(c *Chunker) next() ([]byte, error) {
 
-	c.chunk_num++
+	c.chunkNum++
 	nominal_chunk, err := c.get_nominal_chunk()
 
 	if err != nil {
@@ -78,8 +114,8 @@ func(c *Chunker) next() ([]byte, error) {
 func (c *Chunker) get_nominal_chunk() ([]byte, error) {
 
 	// Read up to the nominal size of the chunk
-	offset := (c.chunk_num * c.num_peers + c.id) * c.chunk_size 
-	nominal_chunk, nominal_err := readAt(c.file, offset, c.chunk_size)
+	offset := (c.chunkNum * c.numPeers + c.id) * c.chunkSize 
+	nominal_chunk, nominal_err := readAt(c.file, offset, c.chunkSize)
 	if nominal_err == io.EOF {
 		return nominal_chunk, io.EOF
 	}
@@ -92,7 +128,7 @@ func (c *Chunker) get_nominal_chunk() ([]byte, error) {
 		// If the first token takes up the entire chunk, we need not process
 		// this chunk at all, it's been done already.  Get the next one.
 		if len(split) == 1 {
-			c.chunk_num++
+			c.chunkNum++
 			return c.get_nominal_chunk()
 		}
 		nominal_chunk = split[len(split)-1]
@@ -108,9 +144,9 @@ func (c *Chunker) get_trailing_sentence() ([]byte) {
 	for {
 		i++
 		this_peek_offset := (
-			c.chunk_num * c.num_peers + c.id + 1) * c.chunk_size +
-			i * c.peek_size
-		this_peek, peek_err := readAt(c.file, this_peek_offset, c.peek_size)
+			c.chunkNum * c.numPeers + c.id + 1) * c.chunkSize +
+			i * c.peekSize
+		this_peek, peek_err := readAt(c.file, this_peek_offset, c.peekSize)
 		peek_chunk = append(peek_chunk, this_peek...)
 
 		// if we reach EOF, just return everything.
@@ -133,3 +169,4 @@ func (c *Chunker) get_trailing_sentence() ([]byte) {
 		// otherwise, we peek further until we find it or reach EOF
 	}
 }
+

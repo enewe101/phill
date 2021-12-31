@@ -1,0 +1,4 @@
+UD_English-EWT/en_ewt-ud-train.conllu
+UD_English-GUM/en_gum-ud-train.conllu
+UD_English-LinES/en_lines-ud-train.conllu
+UD_English-ParTUT/en_partut-ud-train.conllu

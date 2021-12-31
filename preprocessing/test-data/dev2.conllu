@@ -1,0 +1,60 @@
+# sent_id = weblog-blogspot.com_nominations_20041117172713_ENG_20041117_172713-0004
+# text = ***
+1	***	***	PUNCT	NFP	_	0	root	0:root	_
+
+# sent_id = weblog-blogspot.com_nominations_20041117172713_ENG_20041117_172713-0005
+# text = Bush also nominated A. Noel Anketell Kramer for a 15-year term as associate judge of the District of Columbia Court of Appeals, replacing John Montague Steadman.
+1	Bush	Bush	PROPN	NNP	Number=Sing	3	nsubj	3:nsubj	_
+2	also	also	ADV	RB	_	3	advmod	3:advmod	_
+3	nominated	nominate	VERB	VBD	Mood=Ind|Number=Sing|Person=3|Tense=Past|VerbForm=Fin	0	root	0:root	_
+4	A.	A.	PROPN	NNP	Number=Sing	3	obj	3:obj	_
+5	Noel	Noel	PROPN	NNP	Number=Sing	4	flat	4:flat	_
+6	Anketell	Anketell	PROPN	NNP	Number=Sing	4	flat	4:flat	_
+7	Kramer	Kramer	PROPN	NNP	Number=Sing	4	flat	4:flat	_
+8	for	for	ADP	IN	_	13	case	13:case	_
+9	a	a	DET	DT	Definite=Ind|PronType=Art	13	det	13:det	_
+10	15	15	NUM	CD	NumType=Card	12	nummod	12:nummod	SpaceAfter=No
+11	-	-	PUNCT	HYPH	_	12	punct	12:punct	SpaceAfter=No
+12	year	year	NOUN	NN	Number=Sing	13	compound	13:compound	_
+13	term	term	NOUN	NN	Number=Sing	3	obl	3:obl:for	_
+14	as	as	ADP	IN	_	16	case	16:case	_
+15	associate	associate	ADJ	JJ	Degree=Pos	16	amod	16:amod	_
+16	judge	judge	NOUN	NN	Number=Sing	13	nmod	13:nmod:as	_
+17	of	of	ADP	IN	_	19	case	19:case	_
+18	the	the	DET	DT	Definite=Def|PronType=Art	19	det	19:det	_
+19	District	District	PROPN	NNP	Number=Sing	16	nmod	16:nmod:of	_
+20	of	of	ADP	IN	_	22	case	22:case	_
+21	Columbia	Columbia	PROPN	NNP	Number=Sing	22	compound	22:compound	_
+22	Court	Court	PROPN	NNP	Number=Sing	19	nmod	19:nmod:of	_
+23	of	of	ADP	IN	_	24	case	24:case	_
+24	Appeals	Appeal	PROPN	NNPS	Number=Plur	22	nmod	22:nmod:of	SpaceAfter=No
+25	,	,	PUNCT	,	_	3	punct	3:punct	_
+26	replacing	replace	VERB	VBG	VerbForm=Ger	3	advcl	3:advcl	_
+27	John	John	PROPN	NNP	Number=Sing	26	obj	26:obj	_
+28	Montague	Montague	PROPN	NNP	Number=Sing	27	flat	27:flat	_
+29	Steadman	Steadman	PROPN	NNP	Number=Sing	27	flat	27:flat	SpaceAfter=No
+30	.	.	PUNCT	.	_	3	punct	3:punct	_
+
+# newdoc id = weblog-blogspot.com_gettingpolitical_20030906235000_ENG_20030906_235000
+# sent_id = weblog-blogspot.com_gettingpolitical_20030906235000_ENG_20030906_235000-0001
+# newpar id = weblog-blogspot.com_gettingpolitical_20030906235000_ENG_20030906_235000-p0001
+# text = The sheikh in wheel-chair has been attacked with a F-16-launched bomb.
+1	The	the	DET	DT	Definite=Def|PronType=Art	2	det	2:det	_
+2	sheikh	sheikh	NOUN	NN	Number=Sing	9	nsubj:pass	9:nsubj:pass	_
+3	in	in	ADP	IN	_	6	case	6:case	_
+4	wheel	wheel	NOUN	NN	Number=Sing	6	compound	6:compound	SpaceAfter=No
+5	-	-	PUNCT	HYPH	_	6	punct	6:punct	SpaceAfter=No
+6	chair	chair	NOUN	NN	Number=Sing	2	nmod	2:nmod:in	_
+7	has	have	AUX	VBZ	Mood=Ind|Number=Sing|Person=3|Tense=Pres|VerbForm=Fin	9	aux	9:aux	_
+8	been	be	AUX	VBN	Tense=Past|VerbForm=Part	9	aux:pass	9:aux:pass	_
+9	attacked	attack	VERB	VBN	Tense=Past|VerbForm=Part	0	root	0:root	_
+10	with	with	ADP	IN	_	17	case	17:case	_
+11	a	a	DET	DT	Definite=Ind|PronType=Art	17	det	17:det	_
+12	F	f	NOUN	NN	Number=Sing	16	compound	16:compound	SpaceAfter=No
+13	-	-	PUNCT	HYPH	_	12	punct	12:punct	SpaceAfter=No
+14	16	16	NUM	CD	NumType=Card	12	compound	12:compound	SpaceAfter=No
+15	-	-	PUNCT	HYPH	_	16	punct	16:punct	SpaceAfter=No
+16	launched	launch	VERB	VBN	Tense=Past|VerbForm=Part	17	acl	17:acl	_
+17	bomb	bomb	NOUN	NN	Number=Sing	9	obl	9:obl:with	SpaceAfter=No
+18	.	.	PUNCT	.	_	9	punct	9:punct	_
+
