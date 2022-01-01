@@ -5,19 +5,58 @@ import (
 	"strings"
 	"strconv"
 	"fmt"
+	"sort"
 )
 
 type Dictionary struct {
 	tokens2ids map[string]int
 	ids2tokens []string
 	counts []int64
+	numAuxTokens  int
 }
 
-func NewDictionary() *Dictionary {
+
+func NewDictionary(auxTokens []string) *Dictionary {
 	dictionary := Dictionary{}
 	dictionary.tokens2ids = make(map[string]int)
-	dictionary.ids2tokens = make([]string,0)
+	dictionary.Add(auxTokens...)
+	dictionary.numAuxTokens = len(auxTokens)
 	return &dictionary
+}
+
+func(d *Dictionary) Sort() {
+
+	// We'll zip the counts with corresponding tokens together, then sort them
+	// by count.
+	type sortable struct {
+		count int64
+		token string
+	}
+
+	// Make a sorter list containing the counts and tokens zipped together.
+	// We want to leave the first few aux tokens in place, so we omit them from
+	// the sorter.
+	sorter := make([]sortable, len(d.counts))
+	for i:=0; i<len(d.counts); i++ {
+		if i < d.numAuxTokens {continue}
+		sorter[i] = sortable{count:d.counts[i], token:d.ids2tokens[i]}
+	}
+
+	// Sort it.
+	sort.Slice(sorter, func(i,j int) bool {
+		return sorter[i].count > sorter[j].count
+	})
+
+	// Now remake the dictionary with sorted values.
+	for sorterIndex:=0; sorterIndex<len(d.counts)-d.numAuxTokens; sorterIndex++ {
+		dictIndex := sorterIndex + d.numAuxTokens
+		d.counts[dictIndex] = sorter[sorterIndex].count
+		d.ids2tokens[dictIndex] = sorter[sorterIndex].token
+		d.tokens2ids[sorter[sorterIndex].token] = dictIndex
+	}
+	fmt.Println(sorter, "\n\n")
+	fmt.Println(d.ids2tokens, "\n\n")
+	fmt.Println(d.counts, "\n\n")
 }
 
 func(d *Dictionary) Write(path string) {
@@ -29,7 +68,7 @@ func(d *Dictionary) Write(path string) {
 	file.Close()
 }
 
-func ReadDictionary(path string) (*Dictionary, error) {
+func ReadDictionary(path string, numAuxTokens int) (*Dictionary, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {return nil, err}
 	lines := strings.Split(string(data), "\n")
@@ -46,7 +85,8 @@ func ReadDictionary(path string) (*Dictionary, error) {
 		tokens2ids[token] = i
 		counts[i] = int64(count)
 	}
-	dictionary := NewDictionary()
+	auxTokens := ids2tokens[:numAuxTokens]
+	dictionary := NewDictionary(auxTokens)
 	dictionary.ids2tokens = ids2tokens
 	dictionary.tokens2ids = tokens2ids
 	dictionary.counts = counts

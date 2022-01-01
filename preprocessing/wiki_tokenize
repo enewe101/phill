@@ -3,11 +3,11 @@
 # Run this on the "extracted" directory produced by wikiextractor
 # https://github.com/attardi/wikiextractor
 
-# Absolute path to this file.
-SCRIPTPATH="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+# Absolute path to this file's dir.
+SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 
 # The python script below uses NLTK to sentence-split and tokenize from stdin.
-tokenizer_script=$SCRIPTPATH/wiki_tokenize.py
+tokenizer_script=$SCRIPTDIR/wiki_tokenize.py
 
 # Get a couple args:
 extracted_dir=$1	# Output dir from wikiextract containing e.g. AA, AB, etc.

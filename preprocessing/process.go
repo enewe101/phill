@@ -14,6 +14,9 @@ const relationDictFname = "relations.dict"
 const Mb = int64(1024 * 1024)
 const Kb = int64(1024)
 const numWorkersPerFile = 4
+var auxWords = []string{"<ROOT>", "<UNK>", "<PAD>"}
+var auxRelations = []string{"self"}
+
 
 // Parser functions that factor out file-format specific parsing.
 type dictParser func(*[]byte) (*[]string, *[]string)
@@ -34,10 +37,9 @@ func makeDictionary(inPaths []string, outDir string, parser dictParser) {
 
 	// Read dictionaries, if they exist, or create them.
 	tokenDictPath := outDir + "/" + tokenDictFname
-	tokenDict := readOrCreateDictionary(
-		tokenDictPath, []string{"<ROOT>", "<UNK>", "<PAD>"})
+	tokenDict := readOrCreateDictionary(tokenDictPath, auxWords)
 	relationDictPath := outDir + "/" + relationDictFname
-	relationDict := readOrCreateDictionary(relationDictPath, []string{"self"})
+	relationDict := readOrCreateDictionary(relationDictPath, auxRelations)
 
 	// Parse each file, and add the parsed tokens to the dictionaries.
 	for i, inPath := range inPaths {
@@ -52,10 +54,11 @@ func makeDictionary(inPaths []string, outDir string, parser dictParser) {
 	printProgress(1, 1, 1)
 
 	// Write the dictionaries to disk.
+	tokenDict.Sort()
 	tokenDict.Write(tokenDictPath)
+	relationDict.Sort()
 	relationDict.Write(relationDictPath)
 }
-
 
 // Parse all of the files in `inPaths`, using `parser`.  The parser creates
 // strings representing sentences using ids assigned by the dictionaries.
@@ -75,9 +78,9 @@ func indexSentences(inPaths []string, outDir string, parser sentenceParser) {
 	// Read dictionaries used to index sentences.
 	tokenDictPath := outDir + "/" + tokenDictFname
 	relationDictPath := outDir + "/" + relationDictFname
-	tokenDict, err := ReadDictionary(tokenDictPath)
+	tokenDict, err := ReadDictionary(tokenDictPath, len(auxWords))
 	if err != nil {panic(err.Error())}
-	relationDict, err := ReadDictionary(relationDictPath)
+	relationDict, err := ReadDictionary(relationDictPath, len(auxRelations))
 	if err != nil {panic(err.Error())}
 
 	// Parse each input file; write the parsed sentences to disk
@@ -93,17 +96,16 @@ func indexSentences(inPaths []string, outDir string, parser sentenceParser) {
 }
 
 
-func readOrCreateDictionary(path string, initialTokens []string) *Dictionary {
+func readOrCreateDictionary(path string, auxTokens []string) *Dictionary {
 	// Attempt to read a dictionary at path.  If none exists, make one, and
 	// check that we can at least write to the dictionary path.
 	var dictionary *Dictionary
-	dictionary, err := ReadDictionary(path)
+	dictionary, err := ReadDictionary(path, len(auxTokens))
 	if err != nil {
 		// Create a new dictionary.  Check that the desired path is writable
 		// to avoid a late IO error.
 		checkWritable(path)
-		dictionary = NewDictionary()
-		dictionary.Add(initialTokens...)
+		dictionary = NewDictionary(auxTokens)
 	} else {
 		fmt.Println("Using found dictionary.")
 	}
