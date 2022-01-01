@@ -175,12 +175,14 @@ class PaddedDatasetParallel(Dataset):
         self.path = path
         self.padding = padding
         self.min_length = min_length
-        self.dictionary = m.Dictionary(
-            self.tokens_path(), vocab_limit=vocab_limit)
-        self.Px = self.calculate_Px(vocab_limit)
         self.has_heads = has_heads
         self.has_relations = has_relations
+        self.vocab_limit = vocab_limit
 
+        # Build the dictionaries
+        self.dictionary = m.Dictionary(
+            self.tokens_path(), vocab_limit=vocab_limit)
+        self.Px = self.calculate_Px()
         self.relations_dictionary = None
         if has_relations:
             self.relations_dictionary = m.Dictionary(self.relations_path())
@@ -189,14 +191,15 @@ class PaddedDatasetParallel(Dataset):
         total_bytes = os.path.getsize(self.sentences_path())
         self.num_chunks = math.ceil(total_bytes / approx_chunk_size)
 
-    def calculate_Px(self, vocab_limit=None):
+
+    def calculate_Px(self):
 
         Nx = torch.tensor(self.dictionary.counts)
 
         # If vocab_limit is an integer, then we'll slice out only frequencies
         # up to vocab_limit.  Attribute cut words to counts of "<UNK>".
-        if vocab_limit is not None:
-            Nx_limited = Nx[:vocab_limit]
+        if self.vocab_limit is not None:
+            Nx_limited = Nx[:self.vocab_limit]
             Nx_cut_weight = Nx.sum() - Nx_limited.sum()
             Nx_limited[self.dictionary.get_id("<UNK>")] += Nx_cut_weight
             Nx = Nx_limited
@@ -277,19 +280,22 @@ class PaddedDatasetParallel(Dataset):
 
     def parse_line(self, line):
 
-        parse = line.split(";")
-        tokens = parse[0]
-        tokens = [int(tokenId) for tokenId in tokens.split(",")]
+        parsed_line = line.split(";")
+        tokens = [int(t) for t in parsed_line[0].split(",")]
+
+        # If vocab_limit is set, convert high token_ids to the id for <UNK>.
+        if self.vocab_limit is not None:
+            unk_id = self.dictionary.get_id("<UNK>")
+            tokens = [t if t < self.vocab_limit else unk_id for t in tokens]
 
         heads = None
         if self.has_heads:
-            heads = parse[1]
-            heads = [int(headPos) for headPos in heads.split(",")]
+            heads = [int(headPos) for headPos in parsed_line[1].split(",")]
 
         relations = None
         if self.has_relations:
-            relations = parse[2]
-            relations = [int(relationId) for relationId in relations.split(",")]
+            relations = [
+                int(relationId) for relationId in parsed_line[2].split(",")]
 
         return tokens, heads, relations
 

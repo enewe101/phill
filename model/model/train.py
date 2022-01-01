@@ -51,7 +51,6 @@ def train_edge(load_existing_path=None):
         approx_chunk_size=10*m.const.KB,
         vocab_limit=vocab_limit
     )
-    pdb.set_trace()
 
     if load_existing_path is not None:
         model = m.EdgeModel.load(load_existing_path, data.Px)

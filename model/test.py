@@ -80,7 +80,7 @@ class DatasetTest(TestCase):
         dataset = m.PaddedDatasetParallel(
             path, PAD, min_length=0, has_heads=True, has_relations=True,
             approx_chunk_size=1024, vocab_limit=vocab_limit)
-
+        unk_id = dataset.dictionary.get_id("<UNK>")
         with open(os.path.join(path, "tokens.dict")) as f:
             Nx = torch.tensor([
                 int(line.strip().split("\t")[1])
@@ -88,10 +88,21 @@ class DatasetTest(TestCase):
             ])
             Nx_limit = Nx[:vocab_limit]
             cut_weight = Nx.sum() - Nx_limit.sum()
-            Nx_limit[dataset.dictionary.get_id("<UNK>")] += cut_weight
+            Nx_limit[unk_id] += cut_weight
             expected_Px = Nx_limit / Nx_limit.sum()
 
         self.assertTrue(torch.equal(dataset.Px, expected_Px))
+
+        # In the actual sentence data, we should never see tokens whose idx is
+        # greater than vocab_limit
+        for batch in dataset:
+            found_tokens_batch, head_idxs_batch, relations_batch, mask = batch
+            expected_tokens_batch = torch.clone(found_tokens_batch)
+            high_ids = (expected_tokens_batch >= vocab_limit)
+            expected_tokens_batch[high_ids] = unk_id
+            self.assertTrue(torch.equal(
+                found_tokens_batch, expected_tokens_batch))
+
 
 
     def test_padded_dataset_parallel(self):
