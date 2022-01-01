@@ -54,9 +54,6 @@ func(d *Dictionary) Sort() {
 		d.ids2tokens[dictIndex] = sorter[sorterIndex].token
 		d.tokens2ids[sorter[sorterIndex].token] = dictIndex
 	}
-	fmt.Println(sorter, "\n\n")
-	fmt.Println(d.ids2tokens, "\n\n")
-	fmt.Println(d.counts, "\n\n")
 }
 
 func(d *Dictionary) Write(path string) {

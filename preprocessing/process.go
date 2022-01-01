@@ -29,7 +29,7 @@ type sentenceParser func(*[]byte, *Dictionary, *Dictionary) (*[]string)
 func makeDictionary(inPaths []string, outDir string, parser dictParser) {
 
 	// We do some non-newline-containing prints.  Clean up with a newline.
-	defer fmt.Println()
+	defer fmt.Println() 
 
 	// Create (if noexist) the directory where output will be written.
 	err := os.Mkdir(outDir, 0777)
@@ -53,10 +53,12 @@ func makeDictionary(inPaths []string, outDir string, parser dictParser) {
 	}
 	printProgress(1, 1, 1)
 
-	// Write the dictionaries to disk.
+	// Sort and Write the dictionaries to disk.
+	fmt.Fprintf(os.Stderr, "\nSorting..")
 	tokenDict.Sort()
-	tokenDict.Write(tokenDictPath)
 	relationDict.Sort()
+	fmt.Fprintf(os.Stderr, "\nWriting..")
+	tokenDict.Write(tokenDictPath)
 	relationDict.Write(relationDictPath)
 }
 
@@ -107,7 +109,7 @@ func readOrCreateDictionary(path string, auxTokens []string) *Dictionary {
 		checkWritable(path)
 		dictionary = NewDictionary(auxTokens)
 	} else {
-		fmt.Println("Using found dictionary.")
+		fmt.Fprintf(os.Stderr, "Using found dictionary.\n")
 	}
 	return dictionary
 }
