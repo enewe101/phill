@@ -74,6 +74,26 @@ class DatasetTest(TestCase):
         self.assertTrue(found_sentences == expected_sentences)
 
 
+    def test_padded_dataset_parallel_limit_vocab_Nx(self):
+        path = os.path.join(TEST_DATA_PATH, "one-sentence-dataset")
+        vocab_limit = 10
+        dataset = m.PaddedDatasetParallel(
+            path, PAD, min_length=0, has_heads=True, has_relations=True,
+            approx_chunk_size=1024, vocab_limit=vocab_limit)
+
+        with open(os.path.join(path, "tokens.dict")) as f:
+            Nx = torch.tensor([
+                int(line.strip().split("\t")[1])
+                for line in f if line.strip() != ""
+            ])
+            Nx_limit = Nx[:vocab_limit]
+            cut_weight = Nx.sum() - Nx_limit.sum()
+            Nx_limit[dataset.dictionary.get_id("<UNK>")] += cut_weight
+            expected_Px = Nx_limit / Nx_limit.sum()
+
+        self.assertTrue(torch.equal(dataset.Px, expected_Px))
+
+
     def test_padded_dataset_parallel(self):
         path = os.path.join(TEST_DATA_PATH, "ten-sentence-dataset")
         dataset = m.PaddedDatasetParallel(
@@ -108,7 +128,6 @@ class DatasetTest(TestCase):
 
         sentences_path = os.path.join(path, "sentences.index")
         expected_sentences = self.read_expected_sentences(sentences_path)
-        pdb.set_trace()
         self.assertTrue(found_sentences == expected_sentences)
 
 
@@ -342,6 +361,24 @@ class Word2VecModelTest(TestCase):
         self.assertTrue(torch.allclose(counts, probs, atol=1e-2))
 
 
+class TestDictionary(TestCase):
+
+    def test_dictionary(self):
+        vocab_limit = 10
+        dict_path = "test-data/one-sentence-dataset/tokens.dict"
+        dictionary = m.Dictionary(dict_path, vocab_limit=vocab_limit)
+        unk_idx = dictionary.get_id("<UNK>")
+        with open(dict_path) as f:
+            expected_tokens = [
+                line.split("\t")[0] 
+                for line in f if line.strip() != ""
+            ]
+        for og_idx, token in enumerate(expected_tokens):
+            found_idx = dictionary.get_id(token)
+            expected_idx = og_idx if og_idx < vocab_limit else unk_idx
+            self.assertTrue(found_idx == expected_idx)
+
+
 class ParityTokenSamplerTest(TestCase):
 
     def test_get_node_parity(self):
@@ -356,8 +393,8 @@ class ParityTokenSamplerTest(TestCase):
 
         # We'll use a couple real sentences with annotated parse structure
         dataset_path = os.path.join(TEST_DATA_PATH, "ten-sentence-dataset")
-        dataset = m.PaddedDataset(dataset_path, PAD)
-        dataset.read()
+        dataset = m.PaddedDatasetParallel(
+            dataset_path, PAD, has_heads=True, has_relations=True )
 
         # Build the sampler, and read the batch from the dataset.  Adjust
         # padding
@@ -372,6 +409,31 @@ class ParityTokenSamplerTest(TestCase):
         # These were verified by hand.
         expected_node_parities = torch.tensor([
             [
+                False, True, False, False, False, False, True, False, True,
+                False, False, False, False, False, True, False, False, False,
+                True, True, True, False, False, True, True, False, False,
+                False, True, False, True, True, True, True, True, True, True
+            ],[
+                False, False, True, False, False, False, False, True, False,
+                False, True, False, False, True, False, False, True, False,
+                False, True, True, True, True, True, True, True, True, True,
+                True, True, True, True, True, True, True, True, True
+            ],[
+                False, True, False, False, True, False, False, False, False,
+                True, False, True, True, False, True, True, False, False, True,
+                True, True, True, True, True, True, True, True, True, True,
+                True, True, True, True, True, True, True, True
+            ],[
+                False, False, False, True, False, False, True, True, True,
+                False, False, False, True, True, True, False, False, True,
+                True, True, True, True, True, True, True, True, True, True,
+                True, True, True, True, True, True, True, True, True
+            ],[
+                False, True, False, False, True, False, True, True, True, True,
+                False, False, False, True, True, False, False, True, True,
+                False, False, True, False, False, False, False, True, True,
+                True, True, True, False, False, False, False, True, False
+            ],[
                 False, True, False, False, False, True, True, True, False,
                 False, False, False, True, False, True, True, True, True, True,
                 True, True, True, True, True, True, True, True, True, True,
@@ -382,35 +444,10 @@ class ParityTokenSamplerTest(TestCase):
                 True, True, True, True, True, True, True, True, True, True,
                 True, True, True, True, True, True, True, True
             ],[
-                False, False, False, True, False, False, True, True, True,
-                False, False, False, True, True, True, False, False, True,
-                True, True, True, True, True, True, True, True, True, True,
-                True, True, True, True, True, True, True, True, True
-            ],[
                 False, True, False, False, True, True, True, True, True, True,
                 True, False, False, False, False, True, False, True, True,
                 True, True, True, True, True, True, True, True, True, True,
                 True, True, True, True, True, True, True, True
-            ],[
-                False, True, False, False, True, False, False, False, False,
-                True, False, True, True, False, True, True, False, False, True,
-                True, True, True, True, True, True, True, True, True, True,
-                True, True, True, True, True, True, True, True
-            ],[
-                False, False, True, False, False, False, False, True, False,
-                False, True, False, False, True, False, False, True, False,
-                False, True, True, True, True, True, True, True, True, True,
-                True, True, True, True, True, True, True, True, True
-            ],[
-                False, False, True, False, True, False, True, True, True,
-                False, False, False, False, True, True, True, True, False,
-                True, False, False, True, True, True, True, True, True, True,
-                True, True, True, True, True, True, True, True, True
-            ],[
-                False, True, False, False, False, False, True, False, True,
-                False, False, False, False, False, True, False, False, False,
-                True, True, True, False, False, True, True, False, False,
-                False, True, False, True, True, True, True, True, True, True
             ],[
                 False, True, False, True, True, True, False, False, True,
                 False, False, True, True, False, True, True, False, False,
@@ -418,10 +455,10 @@ class ParityTokenSamplerTest(TestCase):
                 True, True, False, False, False, True, True, False, False,
                 True
             ],[
-                False, True, False, False, True, False, True, True, True, True,
-                False, False, False, True, True, False, False, True, True,
-                False, False, True, False, False, False, False, True, True,
-                True, True, True, False, False, False, False, True, False
+                False, False, True, False, True, False, True, True, True,
+                False, False, False, False, True, True, True, True, False,
+                True, False, False, True, True, True, True, True, True, True,
+                True, True, True, True, True, True, True, True, True
             ]
         ])
 
@@ -888,10 +925,10 @@ class ParseSamplingMeasureTests(TestCase):
 
         # The frequencies should be uniform and all close to 1 / num_trees:
         torch.set_printoptions(sci_mode=False)
-        print("Elapsed:", elapsed)
-        print((found_probs - expected_probs).abs().mean())
-        print(found_probs)
-        print(expected_probs)
+        #print("Elapsed:", elapsed)
+        #print((found_probs - expected_probs).abs().mean())
+        #print(found_probs)
+        #print(expected_probs)
         self.assertTrue(torch.allclose(
             found_probs,
             expected_probs,

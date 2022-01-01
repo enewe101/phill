@@ -38,6 +38,7 @@ def train_edge(load_existing_path=None):
     num_epochs = 100
     batch_size = 100
     embed_dim = 200
+    vocab_limit = 50000
 
     # TODO: Can padding be zero like elsewhere?
     # Get the data, model, and optimizer.
@@ -47,7 +48,8 @@ def train_edge(load_existing_path=None):
         min_length=0,
         has_heads=False,
         has_relations=False,
-        approx_chunk_size=10*m.const.KB
+        approx_chunk_size=10*m.const.KB,
+        vocab_limit=vocab_limit
     )
     pdb.set_trace()
 

@@ -2,7 +2,8 @@ import pdb
 
 class Dictionary:
 
-    def __init__(self, path=None):
+    def __init__(self, path=None, vocab_limit=None):
+        self.vocab_limit = vocab_limit
         self.tokens_2_ids = {}
         self.ids_2_tokens = []
         self.counts = []
@@ -11,14 +12,20 @@ class Dictionary:
 
 
     def __len__(self):
-        return len(self.ids_2_tokens)
+        length = len(self.ids_2_tokens)
+        if self.vocab_limit is not None and self.vocab_limit < length:
+            length = self.vocab_limit
+        return length
 
 
     def get_id(self, token, safe=False):
         if safe:
-            return self.tokens_2_ids.get(token, "<UNK>")
+            idx = self.tokens_2_ids.get(token, "<UNK>")
         else:
-            return self.tokens_2_ids[token]
+            idx = self.tokens_2_ids[token]
+        if idx >= self.vocab_limit:
+            idx = self.tokens_2_ids["<UNK>"]
+        return idx
 
 
     def get_ids(self, tokens, safe=False):
@@ -26,6 +33,8 @@ class Dictionary:
 
 
     def get_token(self, idx, safe=False):
+        if self.vocab_limit is not None and idx >= self.vocab_limit:
+            return "<UNK>"
         try:
             return self.ids_2_tokens[idx]
         except:

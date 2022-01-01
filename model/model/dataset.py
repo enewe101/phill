@@ -37,6 +37,14 @@ def parse_sentences_by_length_(lines_generator):
     return token_chunks, head_chunks, relation_chunks
 
 
+def parse_line(line):
+    tokens, heads, relations = line.split(";")
+    tokens = [int(tokenId) for tokenId in tokens.split(",")]
+    heads = [int(headPos) for headPos in heads.split(",")]
+    relations = [int(relationId) for relationId in relations.split(",")]
+    return tokens, heads, relations
+
+
 class LengthGroupedDataset(Dataset):
 
     def __init__(self, path):
@@ -160,14 +168,16 @@ class PaddedDatasetParallel(Dataset):
             min_length=0,
             has_heads=False,
             has_relations=False,
-            approx_chunk_size=100*m.const.KB
+            approx_chunk_size=100*m.const.KB,
+            vocab_limit=None
     ):
 
         self.path = path
         self.padding = padding
         self.min_length = min_length
-        self.dictionary = m.Dictionary(self.tokens_path())
-        self.Px = self.calculate_Px()
+        self.dictionary = m.Dictionary(
+            self.tokens_path(), vocab_limit=vocab_limit)
+        self.Px = self.calculate_Px(vocab_limit)
         self.has_heads = has_heads
         self.has_relations = has_relations
 
@@ -179,8 +189,18 @@ class PaddedDatasetParallel(Dataset):
         total_bytes = os.path.getsize(self.sentences_path())
         self.num_chunks = math.ceil(total_bytes / approx_chunk_size)
 
-    def calculate_Px(self):
+    def calculate_Px(self, vocab_limit=None):
+
         Nx = torch.tensor(self.dictionary.counts)
+
+        # If vocab_limit is an integer, then we'll slice out only frequencies
+        # up to vocab_limit.  Attribute cut words to counts of "<UNK>".
+        if vocab_limit is not None:
+            Nx_limited = Nx[:vocab_limit]
+            Nx_cut_weight = Nx.sum() - Nx_limited.sum()
+            Nx_limited[self.dictionary.get_id("<UNK>")] += Nx_cut_weight
+            Nx = Nx_limited
+
         return Nx / Nx.sum()
 
     def tokens_path(self):
