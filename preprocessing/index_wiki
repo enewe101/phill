@@ -1,0 +1,17 @@
+#!/bin/bash
+# Test making dictionaries and sentence index on plaintext files.
+
+# Absolute path to this file's dir.
+SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+
+# Clean up old output from running the test.
+
+wiki_out=$(cat $SCRIPTDIR/wiki-out.path)
+rm $wiki_out/tokens.dict 2> /dev/null
+rm $wiki_out/relations.dict 2> /dev/null
+rm $wiki_out/sentences.index 2> /dev/null
+
+# Run program in question: first to make dictionaries, then to index sentences.
+go run *.go plain dict $SCRIPTDIR/wiki-files-to-process.paths $wiki_out
+go run *.go plain index $SCRIPTDIR/wiki-files-to-process.paths $wiki_out
+
