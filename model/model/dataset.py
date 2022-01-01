@@ -1,20 +1,17 @@
 import os
 import pdb
 from collections import defaultdict, Counter
-
 import torch
 from torch.utils.data import Dataset
-
 import model as m
 
 
-
-def read_conllu(path):
+def read_sentences(path):
     with open(path, 'r') as infile:
-        return read_conllu_(infile)
+        return read_sentences_(infile)
 
 
-def read_conllu_(infile):
+def read_sentences_(infile):
 
     Nx = Counter()
 
@@ -74,7 +71,7 @@ class LengthGroupedDataset(Dataset):
     def read(self):
 
         self.dictionary = m.Dictionary(self.tokens_path())
-        chunks = read_conllu(self.sentences_path())
+        chunks = read_sentences(self.sentences_path())
         token_chunks, head_chunks, relation_chunks, self.Px = chunks
 
         # Tensorify the chunks grouping tokens, heads, and labels together
@@ -97,8 +94,8 @@ class LengthGroupedDataset(Dataset):
         return len(self.data)
 
 
-class PaddedDataset(Dataset):
 
+class PaddedDataset(Dataset):
 
     def __init__(self, path, padding=0, batch_size=500, min_length=0):
         self.path = path
@@ -117,7 +114,7 @@ class PaddedDataset(Dataset):
     def read(self):
 
         self.dictionary = m.Dictionary(self.tokens_path())
-        chunks = read_conllu(self.sentences_path())
+        chunks = read_sentences(self.sentences_path())
         token_chunks, head_chunks, relation_chunks, self.Px = chunks
         self.data = []
 
@@ -166,6 +163,84 @@ class PaddedDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.data[idx]
+
+
+    def __len__(self):
+        return len(self.data)
+
+
+
+class PaddedDatasetParallel(Dataset):
+
+    def __init__(self, path, padding=0, batch_size=500, min_length=0):
+        self.path = path
+        self.padding = padding
+        self.batch_size = batch_size
+        self.min_length = min_length
+        self.dictionary = self.read_dictionary()
+
+
+    def tokens_path(self):
+        return os.path.join(self.path, "tokens.dict")
+
+    def sentences_path(self):
+        return os.path.join(self.path, "sentences.index")
+
+    def read_dictionary(self):
+        self.dictionary = m.Dictionary(self.tokens_path())
+
+    def read(self, chunk_num):
+
+        chunks = read_sentences(self.sentences_path())
+        token_chunks, head_chunks, relation_chunks, self.Px = chunks
+        self.data = []
+
+        tokens_batch, heads_batch, relations_batch = [],[],[]
+        for length in sorted(token_chunks.keys()):
+            for i in range(len(token_chunks[length])):
+                if length < self.min_length:
+                    continue
+
+                tokens_batch.append(token_chunks[length][i])
+                heads_batch.append(head_chunks[length][i])
+                relations_batch.append(relation_chunks[length][i])
+
+                if len(tokens_batch) == self.batch_size:
+                    self.pad_append(
+                        length, tokens_batch, heads_batch, relations_batch)
+                    tokens_batch, heads_batch, relations_batch = [], [], []
+
+        if len(tokens_batch) > 0:
+            self.pad_append(
+                length, tokens_batch, heads_batch, relations_batch)
+
+
+    def pad_append(self, length, tokens_batch, heads_batch, relations_batch):
+        padding_mask = self.get_padding_mask(length, tokens_batch)
+        self.data.append((
+            torch.tensor(self.pad(length, tokens_batch)),
+            torch.tensor(self.pad(length, heads_batch)),
+            torch.tensor(self.pad(length, relations_batch)),
+            torch.tensor(self.get_padding_mask(length, tokens_batch))
+        ))
+
+
+    def get_padding_mask(self, length, symbols_batch):
+        return [
+            [False] * len(symbols) + [True] * (length - len(symbols))
+            for symbols in symbols_batch
+        ]
+
+
+    def pad(self, length, symbols_batch):
+        return [
+            symbols + [self.padding] * (length - len(symbols))
+            for symbols in symbols_batch
+        ]
+
+
+    def __getitem__(self, idx):
+        return self.read(idx)
 
 
     def __len__(self):

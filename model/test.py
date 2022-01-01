@@ -38,7 +38,9 @@ class TestVisualization(TestCase):
             tokens_batch[i] = tokens_batch[i][:-num_masked]
             head_ptrs_batch[i] = head_ptrs_batch[i][:-num_masked]
         m.viz.print_trees(
-            tokens_batch, head_ptrs_batch, data.dictionary, SCRATCH_DATA_PATH)
+            tokens_batch, head_ptrs_batch, head_ptrs_batch, data.dictionary,
+            SCRATCH_DATA_PATH
+        )
 
 
 class DatasetTest(TestCase):
@@ -54,8 +56,7 @@ class DatasetTest(TestCase):
 
 
     def test_length_grouped_dataset(self):
-        path = os.path.join(
-            TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
+        path = os.path.join(TEST_DATA_PATH, "ten-sentence-dataset")
         dataset = m.LengthGroupedDataset(path)
         dataset.read()
 
@@ -68,13 +69,13 @@ class DatasetTest(TestCase):
                     (tokens_batch[i], heads_batch[i], relations_batch[i])
                 ]))
 
-        expected_sentences = self.read_expected_sentences(path)
+        sentences_path = os.path.join(path, "sentences.index")
+        expected_sentences = self.read_expected_sentences(sentences_path)
         self.assertTrue(found_sentences == expected_sentences)
 
 
     def test_padded_dataset(self):
-        path = os.path.join(
-            TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
+        path = os.path.join(TEST_DATA_PATH, "ten-sentence-dataset")
         batch_size = 7
         dataset = m.PaddedDataset(path, PAD, batch_size)
         dataset.read()
@@ -105,7 +106,8 @@ class DatasetTest(TestCase):
                     for symbols in (tokens, heads, relations)
                 ]))
 
-        expected_sentences = self.read_expected_sentences(path)
+        sentences_path = os.path.join(path, "sentences.index")
+        expected_sentences = self.read_expected_sentences(sentences_path)
         self.assertTrue(found_sentences == expected_sentences)
 
 
@@ -135,9 +137,10 @@ class Word2VecModelTest(TestCase):
 
     def test_get_head_probs(self):
 
+        vocab_size = 100
+        embedding_dim = 4
         Px = torch.tensor([1/100] * 100)
-        embedding = m.EmbeddingLayer(100,4)
-        model = m.FlatModel(embedding, Px) 
+        model = m.FlatModel(vocab_size, embedding_dim, Px) 
         tokens_batch = torch.tensor([
             [0,90, 91,92,93,94,95,96,97,98], 
             [0,80,81,82,83,84,85,86,87,88]
@@ -177,19 +180,20 @@ class Word2VecModelTest(TestCase):
 
         seed_random(0)
 
+        vocab_size = 100
+        embedding_dim = 4
         Px = torch.tensor([1/100] * 100)
-        embedding = m.EmbeddingLayer(100,4)
-        model = m.FlatModel(embedding, Px) 
+        model = m.FlatModel(vocab_size, embedding_dim, Px) 
         tokens_batch = torch.tensor([[0,90, 91,92,93,94,95,96,97,98]])
         tokens_batch = tokens_batch.expand((2000,-1))
         num_sentences, num_tokens = tokens_batch.shape
 
         # Test the function.
-        heads = model.sample_parses(tokens_batch)
+        head_ptrs = model.sample_parses(tokens_batch)
 
         # We will check which tokens chose <ROOT> as head.
         ROOT = 0
-        zero_heads = (heads == ROOT)
+        zero_heads = (head_ptrs == ROOT)
 
         # Every <ROOT> chooses itself as head.
         for i in range(num_sentences):
@@ -208,10 +212,12 @@ class Word2VecModelTest(TestCase):
         expected_prob = torch.tensor([
             0.0000, 0.3967, 0.2724, 0.1847, 0.1018, 0.0444])
 
-        # We can check actual distances by subtracting the ids of tokens and
-        # their heads (because the ids in token_batch are consecutive).  
+        # Calculate the distances as the difference between the value at 
+        # head_ptrs (index of head) and the index corresponding to that value
+        # (index of dependent).
         dist_counts = torch.zeros(conv.shape[0])
-        distances = (heads - tokens_batch).abs()
+        locations = torch.arange(num_tokens).unsqueeze(0)
+        distances = (head_ptrs - locations).abs()
         for i in range(num_sentences):
             for j in range(num_tokens):
                 # A head should never be selected beyond the support of the
@@ -230,12 +236,11 @@ class Word2VecModelTest(TestCase):
     def test_sample_tokens(self):
 
         seed_random(0)
-
         vocab_size = 10
+        embedding_dim=4
         num_sentences = 10000
         Px = torch.tensor([1/vocab_size] * vocab_size)
-        embedding = m.EmbeddingLayer(vocab_size,4)
-        model = m.FlatModel(embedding, Px) 
+        model = m.FlatModel(vocab_size, embedding_dim, Px) 
         num_metropolis_hastings_steps = 20
 
         # By using the full vocabulary consecutively in one sentence, it will
@@ -248,7 +253,7 @@ class Word2VecModelTest(TestCase):
         kernel = torch.tensor([0,5,4,3,2,1])
         probs = self.calculate_expected_head_probs(kernel, num_tokens)
         sampler = torch.distributions.Categorical(probs)
-        samples = sampler.sample_tokens((num_sentences,))
+        samples = sampler.sample((num_sentences,))
 
         heads = tokens_batch.gather(dim=1,index=samples)
         new_heads = heads.clone()
@@ -281,8 +286,8 @@ class Word2VecModelTest(TestCase):
         # Calculate the expected probability of each token chosing each head
         # We're assuming that sentence_link_energy works
         energy = (
-            embedding.U[tokens_batch[0]] @ embedding.V.T
-            + embedding.Ubias[tokens_batch[0]] + embedding.Vbias.T
+            model.embedding.U[tokens_batch[0]] @ model.embedding.V.T
+            + model.embedding.Ubias[tokens_batch[0]] + model.embedding.Vbias.T
         )
 
         probs = torch.exp(energy)
@@ -312,13 +317,9 @@ class ParityTokenSamplerTest(TestCase):
         """
 
         # We'll use a couple real sentences with annotated parse structure
-        sentence_path = os.path.join(
-            TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
-        dataset = m.PaddedDataset(sentence_path, PAD)
+        dataset_path = os.path.join(TEST_DATA_PATH, "ten-sentence-dataset")
+        dataset = m.PaddedDataset(dataset_path, PAD)
         dataset.read()
-        dictionary_path = os.path.join(
-            TEST_DATA_PATH, "ten-sentence-dataset/tokens.dict")
-        dictionary = m.Dictionary(dictionary_path)
 
         # Build the sampler, and read the batch from the dataset.  Adjust
         # padding
@@ -411,14 +412,10 @@ class ParityTokenSamplerTest(TestCase):
 
         # We'll use a real sentence, with it's annotated parse structure
         # as a starting point of testing the token resampling function.
-        sentence_path = os.path.join(
-            TEST_DATA_PATH, "ten-sentence-dataset/sentences.index")
+        sentence_path = os.path.join(TEST_DATA_PATH, "ten-sentence-dataset")
         dataset = m.PaddedDataset(sentence_path, PAD)
-        dataset.read()
-        dictionary_path = os.path.join(
-            TEST_DATA_PATH, "ten-sentence-dataset/tokens.dict")
-        dictionary = m.Dictionary(dictionary_path)
-        embedding = m.EmbeddingLayer(len(dictionary),4)
+        dataset.dictionary = m.Dictionary(dictionary_path)
+        embedding = m.EmbeddingLayer(len(dataset.dictionary),4)
 
         # For this test, we will just use sentence 7.  It's actually the first
         # sentence in the dataset; a quirk of dataset loading puts it in pos 7.
@@ -495,13 +492,12 @@ class ParityTokenSamplerTest(TestCase):
         weights = torch.exp(mutation_energy)
         expected_probs = weights / weights.sum()
 
-        print("expected_probs, found_probs")
-        print_probs = torch.zeros(3, restricted_vocab)
-        print_probs[0] = expected_probs
-        print_probs[1] = found_probs
-        print_probs[2] = token_sampler.Px
-        print(print_probs.T)
-        pdb.set_trace()
+        #print("expected_probs, found_probs")
+        #print_probs = torch.zeros(3, restricted_vocab)
+        #print_probs[0] = expected_probs
+        #print_probs[1] = found_probs
+        #print_probs[2] = token_sampler.Px
+        #print(print_probs.T)
         self.assertTrue(torch.allclose(found_probs, expected_probs, atol=4e-3))
 
 
@@ -732,7 +728,7 @@ class ParseSamplingMeasureTests(TestCase):
 
     def uniform_test(self, sampler):
 
-        seed_random(0)
+        seed_random(1)
 
         start = time.time()
         vocab = 5
@@ -810,7 +806,7 @@ class ParseSamplingMeasureTests(TestCase):
 
         start = time.time()
         vocab = 5
-        num_sentences = 100000
+        num_sentences = 500000
 
         # Embedding layer random.  Each tree should have a probability 
         # proportional to its energy
@@ -827,7 +823,7 @@ class ParseSamplingMeasureTests(TestCase):
 
         # Generate trees from the model, and count them.
         start = time.time()
-        found_trees = sampler_parses.sample(
+        found_trees = sampler.sample_parses(
             tokens_batch.expand(num_sentences, -1), embedding, mask)
 
         elapsed = time.time() - start
@@ -853,11 +849,11 @@ class ParseSamplingMeasureTests(TestCase):
         expected_m_probs = expected_probs[torch.tensor(tree_counter.m_trees)]
 
         # The frequencies should be uniform and all close to 1 / num_trees:
-        #torch.set_printoptions(sci_mode=False)
-        #print("Elapsed:", elapsed)
-        #print((found_probs - expected_probs).abs().mean())
-        #print(found_probs)
-        #print(expected_probs)
+        torch.set_printoptions(sci_mode=False)
+        print("Elapsed:", elapsed)
+        print((found_probs - expected_probs).abs().mean())
+        print(found_probs)
+        print(expected_probs)
         self.assertTrue(torch.allclose(
             found_probs,
             expected_probs,

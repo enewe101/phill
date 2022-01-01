@@ -1,10 +1,11 @@
-
+import pdb
 
 class Dictionary:
 
     def __init__(self, path=None):
         self.tokens_2_ids = {}
         self.ids_2_tokens = []
+        self.counts = []
         if path is not None:
             self.read(path)
 
@@ -39,12 +40,22 @@ class Dictionary:
 
 
     def read(self, path):
+
+        self.ids_2_tokens = []
+        self.counts = []
+
         with open(path) as f:
-            self.ids_2_tokens = [
-                line.strip() 
-                for line in f 
-                if line.strip() != ""
-            ]
+            for line in f:
+                if line.strip() == "":
+                    continue
+                try:
+                    token, count = line.split('\t')
+                except:
+                    pdb.set_trace()
+                idx = len(self.ids_2_tokens)
+                self.ids_2_tokens.append(token)
+                self.counts.append(count)
+
         self.tokens_2_ids = {
             token : idx
             for idx, token 

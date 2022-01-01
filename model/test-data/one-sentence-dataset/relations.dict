@@ -1,50 +1,13 @@
-self
-root
-punct
-flat
-amod
-nsubj
-parataxis
-obj
-det
-appos
-case
-obl
-nmod
-aux
-iobj
-mark
-acl
-ccomp
-compound:prt
-nummod
-nsubj:pass
-aux:pass
-cop
-compound
-advmod
-advcl
-nmod:poss
-cc
-conj
-xcomp
-acl:relcl
-expl
-fixed
-det:predet
-obl:npmod
-obl:tmod
-nmod:tmod
-csubj
-orphan
-csubj:pass
-vocative
-nmod:npmod
-list
-dislocated
-reparandum
-discourse
-cc:preconj
-flat:foreign
-goeswith
-dep
+self	1
+root	1
+punct	6
+flat	4
+amod	2
+nsubj	1
+parataxis	1
+obj	1
+det	4
+appos	1
+case	4
+obl	1
+nmod	3
