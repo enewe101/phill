@@ -35,23 +35,28 @@ def train_flat():
 def train_edge(load_existing_path=None):
 
     lr = 1e-2
-    temp = 20
     num_epochs = 100
     batch_size = 100
     embed_dim = 200
 
     # TODO: Can padding be zero like elsewhere?
     # Get the data, model, and optimizer.
-    data = m.PaddedDataset(
-        m.const.DEFAULT_GOLD_DATA_DIR, batch_size=batch_size)
+    data = m.PaddedDatasetParallel(
+        m.const.WIKI_DATA_PATH,
+        padding=0,
+        min_length=0,
+        has_heads=False,
+        has_relations=False,
+        approx_chunk_size=10*m.const.KB
+    )
+    pdb.set_trace()
 
     if load_existing_path is not None:
         model = m.EdgeModel.load(load_existing_path, data.Px)
     else:
         model = m.EdgeModel(len(data.dictionary), embed_dim, data.Px)
-    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 
-    # Train the model on the data with the optimizer.
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
     train_model(model, data, optimizer, num_epochs)
 
     pdb.set_trace()
@@ -109,8 +114,8 @@ def train_model(model, data, optimizer, num_epochs):
         print("epoch:", epoch)
         epoch_loss = torch.tensor(0.)
 
-        for batch_num, (tokens_batch, _, _, mask)  in enumerate(data):
-            sys.stdout.write("\b" * 100)
+        for batch_num, (tokens_batch, _, _, mask) in enumerate(data):
+            sys.stdout.write("\b" * 10 + " " * 10 + "\b" * 10)
             sys.stdout.write(str(batch_num))
             sys.stdout.write(":"+str(tokens_batch.shape[1]))
             sys.stdout.flush()
@@ -123,8 +128,9 @@ def train_model(model, data, optimizer, num_epochs):
             with torch.no_grad():
                 epoch_loss += loss/(tokens_batch.shape[0]*tokens_batch.shape[1])
 
-        with torch.no_grad():
-            print_model(model, data.dictionary)
+            if batch_num % 10 == 0:
+                with torch.no_grad():
+                    print_model(model, data.dictionary)
 
         print(epoch_loss)
 

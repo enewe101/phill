@@ -49,6 +49,7 @@ func makeDictionary(inPaths []string, outDir string, parser dictParser) {
 		// Every once in awhile print the progress..
 		printProgress(i, len(inPaths), 100)
 	}
+	printProgress(1, 1, 1)
 
 	// Write the dictionaries to disk.
 	tokenDict.Write(tokenDictPath)
@@ -88,6 +89,7 @@ func indexSentences(inPaths []string, outDir string, parser sentenceParser) {
 		// Every once in awhile print the progress..
 		printProgress(i, len(inPaths), 100)
 	}
+	printProgress(1, 1, 1)
 }
 
 

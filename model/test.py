@@ -74,6 +74,44 @@ class DatasetTest(TestCase):
         self.assertTrue(found_sentences == expected_sentences)
 
 
+    def test_padded_dataset_parallel(self):
+        path = os.path.join(TEST_DATA_PATH, "ten-sentence-dataset")
+        dataset = m.PaddedDatasetParallel(
+            path, PAD, min_length=0, has_heads=True, has_relations=True,
+            approx_chunk_size=1024)
+
+        found_sentences = set()
+        for items in dataset:
+
+            # Wherever mask is 1, the batches should be padding.
+            tokens_batch, head_ptrs_batch, relations_batch, mask_batch = items
+            torch.all(tokens_batch[mask_batch] == PAD)
+            torch.all(head_ptrs_batch[mask_batch] == PAD)
+            torch.all(relations_batch[mask_batch] == PAD)
+
+            # Wherever mask is 0, the batches should contain the expected data.
+            for i in range(tokens_batch.shape[0]):
+                mask = mask_batch[i].tolist()
+                tokens = tokens_batch[i].tolist()
+                heads = head_ptrs_batch[i].tolist()
+                relations = relations_batch[i].tolist()
+                while mask[-1]:
+                    mask.pop()
+                    tokens.pop()
+                    heads.pop()
+                    relations.pop()
+
+                found_sentences.add(";".join([
+                    ",".join([str(t) for t in symbols])
+                    for symbols in (tokens, heads, relations)
+                ]))
+
+        sentences_path = os.path.join(path, "sentences.index")
+        expected_sentences = self.read_expected_sentences(sentences_path)
+        pdb.set_trace()
+        self.assertTrue(found_sentences == expected_sentences)
+
+
     def test_padded_dataset(self):
         path = os.path.join(TEST_DATA_PATH, "ten-sentence-dataset")
         batch_size = 7

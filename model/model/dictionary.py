@@ -54,7 +54,7 @@ class Dictionary:
                     pdb.set_trace()
                 idx = len(self.ids_2_tokens)
                 self.ids_2_tokens.append(token)
-                self.counts.append(count)
+                self.counts.append(int(count))
 
         self.tokens_2_ids = {
             token : idx
