@@ -2,6 +2,7 @@ import os
 import sys
 import pdb
 import time
+import random
 from collections import defaultdict
 
 import torch
@@ -11,22 +12,39 @@ import model as m
 
 def train_flat():
 
-    lr = 1e-2
+    lr = 1e-3
     num_epochs = 100
     batch_size = 100
     embed_dim = 300
+    vocab_limit = 250000
 
     # TODO: Can padding be zero like elsewhere?
     # Get the data, model, and optimizer.
-    data = m.PaddedDataset(
-        m.const.DEFAULT_GOLD_DATA_DIR, padding=-1,
-        batch_size=batch_size, min_length=3
+    data = m.PaddedDatasetParallel(
+        #m.const.DEFAULT_GOLD_DATA_DIR,
+        m.const.WIKI_DATA_PATH,
+        padding=-1,
+        min_length=3,
+        max_length=140,
+        has_heads=False,
+        has_relations=False,
+        approx_chunk_size=100*m.const.KB,
+        vocab_limit=vocab_limit
     )
-    model = m.FlatModel(len(data.dictionary), embed_dim, data.Px)
+
+    dataloader = torch.utils.data.DataLoader(
+        dataset=data,
+        shuffle=True,
+        #num_workers=2,
+        pin_memory=True
+    )
+
+    model = m.FlatModel(len(data.dictionary), embed_dim, data.Nx)
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+    scheduler = Scheduler()
 
     # Train the model on the data with the optimizer.
-    train_model(model, data, optimizer, num_epochs)
+    train_model(model, dataloader, optimizer, scheduler, num_epochs)
 
     pdb.set_trace()
     return model
@@ -34,34 +52,60 @@ def train_flat():
 
 def train_edge(load_existing_path=None):
 
-    lr = 1e-2
+    lr = 1e-3
     num_epochs = 100
     batch_size = 100
-    embed_dim = 200
-    vocab_limit = 50000
+    embed_dim = 300
+    vocab_limit = 250000
 
     # TODO: Can padding be zero like elsewhere?
     # Get the data, model, and optimizer.
     data = m.PaddedDatasetParallel(
+        #m.const.DEFAULT_GOLD_DATA_DIR,
         m.const.WIKI_DATA_PATH,
         padding=0,
-        min_length=0,
+        min_length=3,
+        max_length=140,
         has_heads=False,
         has_relations=False,
-        approx_chunk_size=10*m.const.KB,
+        approx_chunk_size=1*m.const.KB,
         vocab_limit=vocab_limit
+    )
+    batch = data[0]
+
+    dataloader = torch.utils.data.DataLoader(
+        dataset=data,
+        shuffle=True,
+        #num_workers=2,
+        pin_memory=True
     )
 
     if load_existing_path is not None:
-        model = m.EdgeModel.load(load_existing_path, data.Px)
+        model = m.EdgeModel.load(load_existing_path, data.Nx/data.Nx.sum())
     else:
-        model = m.EdgeModel(len(data.dictionary), embed_dim, data.Px)
+        model = m.EdgeModel(
+            len(data.dictionary), embed_dim, data.Nx/data.Nx.sum())
 
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-    train_model(model, data, optimizer, num_epochs)
+    scheduler = schedule_temperature(model, 20, 1, 3000)
+    train_model(model, dataloader, optimizer, scheduler, num_epochs)
 
     pdb.set_trace()
     return model
+
+
+def schedule_temperature(model, init, final, after, scheduler=None):
+    if scheduler is None:
+        scheduler = Scheduler()
+    def set_temp(batch_num): 
+        print(f"setting temperature to {init}")
+        model.start_temp = init
+    def update_temp(batch_num):
+        print(f"setting temperature to {final}")
+        model.start_temp = final
+    scheduler.after(0, set_temp)
+    scheduler.after(after, update_temp)
+    return scheduler
 
 
 def view_edge():
@@ -72,12 +116,12 @@ def view_edge():
     params_subpath = "../test-data/model-params"
     params_dir = os.path.join(m.const.SCRIPT_DIR, params_subpath)
     model_up_path = os.path.join(params_dir, "edge-params.pt")
-    model_up = m.EdgeModel.load(model_up_path, data.Px)
+    model_up = m.EdgeModel.load(model_up_path, data.Nx/data.Nx.sum())
     model_head_ptrs_batch_up = model_up.sample_parses(
         tokens_batch, mask_batch, start_temp=1, temp_step=0.001)
 
     model_down_path = os.path.join(params_dir, "edge-params200.pt")
-    model_down = m.EdgeModel.load(model_down_path, data.Px)
+    model_down = m.EdgeModel.load(model_down_path, data.Nx/data.Nx.sum())
     model_head_ptrs_batch_down = model_down.sample_parses(
         tokens_batch, mask_batch, start_temp=1, temp_step=0.001)
 
@@ -109,37 +153,84 @@ def remove_padding(padded_batch, mask_batch):
     return padded_batch
 
 
-def train_model(model, data, optimizer, num_epochs):
+class Scheduler:
+
+    def __init__(self):
+        self._after = defaultdict(list)
+        self._every = defaultdict(list)
+        self.batch_num = 0
+
+    def tick(self):
+        for func in self._after[self.batch_num]:
+            func(self.batch_num)
+        for frequency, func in self._every:
+            if self.batch_num % frequency == 0:
+                func(self.batch_num)
+        self.batch_num += 1
+
+    def after(self, batch_num, update_function):
+        self._after[batch_num].append(update_function)
+
+    def every(self, num_batches, update_function):
+        self._every.append((batch_num, update_function))
+
+
+def train_model(model, dataloader, optimizer, scheduler, num_epochs):
 
     for epoch in range(num_epochs):
         print("epoch:", epoch)
         epoch_loss = torch.tensor(0.)
 
-        for batch_num, (tokens_batch, _, _, mask) in enumerate(data):
-            sys.stdout.write("\b" * 10 + " " * 10 + "\b" * 10)
-            sys.stdout.write(str(batch_num))
-            sys.stdout.write(":"+str(tokens_batch.shape[1]))
-            sys.stdout.flush()
+        permutation = list(range(len(dataloader.dataset)))
+        random.shuffle(permutation)
+        start = time.time()
+        num_sentences_processed = 0
+        num_batches = len(dataloader)
+        for batch_num, batch in enumerate(dataloader):
 
-            loss = model.get_loss(tokens_batch, mask)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            scheduler.tick()
+            tokens_batch, _, _, mask, batch_idx = batch
+            batch_idx = batch_idx.item()
 
-            with torch.no_grad():
-                epoch_loss += loss/(tokens_batch.shape[0]*tokens_batch.shape[1])
+            for tokens_chunk, mask_chunk in zip(tokens_batch, mask):
 
-            if batch_num % 10 == 0:
+                tokens_chunk = tokens_chunk.squeeze(0)
+                mask_chunk = mask_chunk.squeeze(0)
+
+                sys.stdout.write("\b" * 60 + " " * 60 + "\b" * 60)
+                sys.stdout.write(f"{epoch}:{batch_num}/{num_batches}")
+                sys.stdout.write(":"+str(tokens_chunk.shape[1]))
+
+                elapsed = time.time() - start
+                sent_per_sec = num_sentences_processed / elapsed
+                sys.stdout.write(f"\t{sent_per_sec:.2f} sentences per second")
+                num_sentences_processed += tokens_chunk.shape[0] 
+                sys.stdout.flush()
+
+                loss = model.get_loss(tokens_chunk, mask_chunk)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
                 with torch.no_grad():
-                    print_model(model, data.dictionary)
+                    num_edges = (
+                        tokens_chunk.shape[0] * tokens_chunk.shape[1]
+                        - mask_chunk.sum()
+                    )
+                    epoch_loss += loss/(num_edges)
+
+            if batch_num % 4 == 0:
+                with torch.no_grad():
+                    print(loss)
+                    print_model(model, dataloader.dataset.dictionary)
 
         print(epoch_loss)
 
 
-def print_model(model, dictionary, start_temp=1, temp_step=0.001):
+def print_model(model, dictionary):
     words = [
-        "apparently", "would", "gave", "said",
-        "lawyer", "the", "fast", "Washington"
+        "chocolate", "Chicago", "challenge", "night",
+        "cat", "burn", "fortified", "strange"
     ]
     for word in words:
         word_id = dictionary.get_id(word)
@@ -148,23 +239,21 @@ def print_model(model, dictionary, start_temp=1, temp_step=0.001):
         print(word, "|", " ".join(heads), "|", " ".join(similars))
 
     display_parse(
-        "<ROOT> I gave the documents to my lawyer .".split(),
-        dictionary, model, start_temp, temp_step)
+        "<ROOT> A Washington lobbyist took the opportunity .".split(),
+        dictionary, model)
     display_parse(
-        "<ROOT> Could you buy some pet food ?".split(),
-        dictionary, model, start_temp, temp_step)
+        "<ROOT> Before I go , could we talk ?".split(),
+        dictionary, model)
     display_parse(
-        "<ROOT> Before law school , she studied computer science at MIT".split(),
-        dictionary, model, start_temp, temp_step)
+        "<ROOT> There were three reasons she left Tokyo .".split(),
+        dictionary, model)
 
 
-def display_parse(sentence, dictionary, model, start_temp, temp_step):
+def display_parse(sentence, dictionary, model):
     ids = torch.tensor([dictionary.get_ids(sentence)])
     mask = torch.tensor([[False]*len(sentence)])
-    heads = model.sample_parses(ids, mask, start_temp, temp_step)
+    heads = model.sample_parses(ids, mask)
     print_tree(heads[0].tolist(), sentence)
-
-
 
 
 def get_run_code(batch_size, num_epochs, embedding_dimension, corpus):

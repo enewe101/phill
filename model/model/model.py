@@ -9,7 +9,10 @@ class EdgeModel:
     def __init__(self, vocab_size, embed_dim, Px):
         self.embedding = m.EmbeddingLayer(vocab_size, embed_dim)
         self.token_sampler = m.sp.ParityTokenSampler(Px)
-        self.parse_sampler = m.sp.CycleProofRootingParseSampler()
+        self.parse_sampler = m.sp.SimpleRandomTree()
+        self.start_temp = 1
+        self.temp_step = 0.01
+
 
     @staticmethod
     def load(path, Px):
@@ -22,9 +25,11 @@ class EdgeModel:
         model.embedding.Vbias = params['Vbias']
         return model
 
-    def sample_parses(self, tokens_batch, mask, start_temp=1, temp_step=0.001):
+
+    def sample_parses(self, tokens_batch, mask):
         return self.parse_sampler.sample_parses(
-            tokens_batch, self.embedding, mask, start_temp, temp_step)
+            tokens_batch, self.embedding, mask)#, self.start_temp, self.temp_step)
+
 
     def sample_tokens(self, tokens_batch, head_ptrs, mask):
         return self.token_sampler.sample_tokens(
@@ -64,17 +69,19 @@ class EdgeModel:
 
 class FlatModel:
 
-    def __init__(self, vocab_size, embed_dim, Px):
-        self.embedding = m.EmbeddingLayer(vocab_size, embed_dim)
+    def __init__(self, vocab_size, embed_dim, Nx):
+
+        bias = torch.log(Nx / Nx.sum()).unsqueeze(1).clamp(min=-10)
+        self.embedding = m.EmbeddingLayer(vocab_size, embed_dim, bias=None)
         self.kernel = [torch.tensor(v) for v in [0,5,4,3,2,1]]
-        self.set_Px(Px)
-        self.unigram_sampler = torch.distributions.Categorical(self.Px)
+        self.set_Nx(Nx)
+        self.unigram_sampler = torch.distributions.Categorical(self.Nx)
 
 
-    def set_Px(self, Px):
-        self.Px = Px
+    def set_Nx(self, Nx):
+        self.Nx = Nx
         # We never sample the <ROOT> token.
-        self.Px[0] = 0
+        self.Nx[0] = 0
 
 
     def parameters(self):
@@ -95,8 +102,11 @@ class FlatModel:
         return head_probs
 
 
-    def sample_parses(self, tokens_batch):
+    def sample_parses(self, tokens_batch, mask):
         num_sentences, num_tokens = tokens_batch.shape
+
+        # TODO: Make use of mask instead of testing for -1 as assumed padding id
+        _ = mask
 
         # Construct a head selector, which provides the probability
         # of a token in position i selecting a token in position j as it's
@@ -141,12 +151,17 @@ class FlatModel:
 
         # Sample 1 head for each word in each sentence.
         next_heads = self.unigram_sampler.sample(tokens_batch.shape)
+        #model_uniprobs = torch.exp(self.embedding.Ubias).squeeze(1)
+        #sampler = torch.distributions.Categorical(model_uniprobs)
+        #next_heads = sampler.sample(tokens_batch.shape)
 
         # Calculate link energies for initial heads batch and for the next.
         prev_weights = self.embedding.link_energy(tokens_batch, prev_heads)
         next_weights = self.embedding.link_energy(tokens_batch, next_heads)
 
-        proposal_weights = (self.Px[prev_heads]/self.Px[next_heads])
+        proposal_weights = (self.Nx[prev_heads]/self.Nx[next_heads])
+        #proposal_weights = (1/self.Nx[next_heads])
+        #proposal_weights = (1/model_uniprobs[next_heads])
 
         accept_score = proposal_weights * torch.exp(next_weights - prev_weights)
         reject_score = torch.rand(tokens_batch.shape)
@@ -166,7 +181,7 @@ class FlatModel:
 
     def get_loss(self, tokens_batch, mask):
         with torch.no_grad():
-            positive_head_ptrs = self.sample_parses(tokens_batch)
+            positive_head_ptrs = self.sample_parses(tokens_batch, mask)
             negative_heads = self.sample_tokens(
                 tokens_batch, positive_head_ptrs)
             positive_heads = tokens_batch.gather(

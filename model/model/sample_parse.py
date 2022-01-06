@@ -7,7 +7,9 @@ import model as m
 
 class ContentionParseSampler():
 
-    def sample_parses(self, tokens_batch, embedding, mask=False):
+    def sample_parses(
+        self, tokens_batch, embedding, mask=False, start_temp=1, temp_step=0.000
+    ):
         """
         The approach here is to randomly select all heads, and then resolve any
         issues by reselecting heads for all tokens involved in said issues.
@@ -16,13 +18,17 @@ class ContentionParseSampler():
         """
 
         num_sentences, num_tokens = tokens_batch.shape
+        temp = start_temp
         energy = embedding.sentence_link_energy(tokens_batch, mask)
-        head_selector = torch.distributions.Categorical(torch.exp(energy))
-
-        heads = head_selector.sample()
-        i = 0
+        contenders = torch.tensor([[True]]).expand(tokens_batch.shape)
+        heads = torch.zeros(tokens_batch.shape, dtype=torch.long)
         while True:
-            i += 1
+
+            head_selector = torch.distributions.Categorical(
+                torch.exp(energy/temp))
+            temp += temp_step
+            heads_sample = head_selector.sample()
+            heads = torch.where(contenders, heads_sample, heads)
 
             # Find contentions: cycles or multiple roots.
             has_cycle = self.has_cycle(heads)
@@ -40,8 +46,6 @@ class ContentionParseSampler():
             contenders = has_contention
             #contenders = self.keep_one_contender(has_contention)
 
-            heads_sample = head_selector.sample()
-            heads = torch.where(contenders, heads_sample, heads)
 
         return heads
 
@@ -364,7 +368,7 @@ class CycleProofRootingParseSampler:
         self, rooting, rooted, chose_rooted, chose_ROOT, fully_rooted, mask
     ):
         # If you chose ROOT, then clear what was previously rooted.
-        new_rooted = torch.where(chose_ROOT, False, rooted)
+        new_rooted = torch.where(chose_root, False, rooted)
         # If you chose a rooted token, then add rooting to rooted.
         new_rooted = torch.where(
             chose_rooted, new_rooted.logical_or(rooting), new_rooted)
@@ -376,5 +380,290 @@ class CycleProofRootingParseSampler:
         new_rooted[mask] = True
         return new_rooted
 
+
+
+
+class WalkSampler:
+
+    def sample_parses(
+        self, tokens_batch, embedding, mask, start_temp=1, temp_step=0
+    ):
+
+        num_sentences, num_tokens = tokens_batch.shape
+
+        # Track which nodes have been seen.
+        seen = torch.zeros_like(tokens_batch, dtype=torch.bool)
+        seen[mask] = True
+        seen[:,0] = True
+
+        # Encode the partial parse structure as a choice of head by each token.
+        head_ptrs = torch.full_like(tokens_batch, -1)
+        head_ptrs[mask] = 0
+        head_ptrs[:,0] = 0
+
+        # Heads are chosen randomly with probability based on link energy.
+        energy = embedding.sentence_link_energy(tokens_batch, mask)
+        # Tokens never choose root in this sampler.  Instead root is the 
+        # token first landed on whenever all tokens have been seen.
+        energy[:,:,0] = -torch.inf
+        energy[:,0,0] = 0
+        print(energy[0])
+
+        # Each iteration, one node per sentence is considered "active".
+        # Choose from one of the non-ROOT non-PAD tokens.
+        ptr_sampler = torch.distributions.Categorical(seen.logical_not())
+        ptr = ptr_sampler.sample().unsqueeze(1)
+        per_sentence = torch.arange(num_sentences)
+        seen[per_sentence, ptr.squeeze(1)] = True
+
+        # In each sentence, the "active" node chosen is considered in "rooting"  
+        temp = start_temp - temp_step
+        i = 0
+        while i < 5*num_tokens or not seen.all():
+
+            i += 1
+            temp += temp_step
+
+            # Have each pointed-to token select a head.
+            head_probs = torch.exp(energy / temp)
+            this_head_ptr = torch.distributions.Categorical(
+                head_probs[per_sentence, ptr.squeeze(1)]).sample().unsqueeze(1)
+
+            # Record the head selection made by the pointed-to token.
+            head_ptrs[per_sentence, ptr.squeeze(1)] = this_head_ptr.squeeze(1)
+            # The head is root until (and unless) next iteration occurs
+            head_ptrs[per_sentence, this_head_ptr.squeeze(1)] = 0
+
+            # Move the pointer to the newly selected head.
+            ptr = this_head_ptr
+            seen[per_sentence, ptr.squeeze(1)] = True
+
+        print(f"{i} turns to parse")
+
+        assert not torch.any(head_ptrs == -1), "Invalid parse exists."
+        return head_ptrs
+
+
+class SimpleRandomTree:
+
+    def init_state(self, num_tokens, num_sentences, mask):
+        tree = torch.full((num_sentences, num_tokens,),-1, dtype=torch.int64)
+        tree[:,0] = 0
+        tree[mask] = 0
+        intree = torch.zeros((num_sentences, num_tokens,), dtype=torch.bool)
+        intree[:,0] = True
+        intree[mask] = True
+        leaf_ptr = torch.distributions.Categorical(
+            intree.logical_not()).sample()
+        head_ptr = leaf_ptr.clone()
+        has_root = torch.zeros((num_sentences,), dtype=torch.bool)
+        return tree, intree, leaf_ptr, head_ptr, has_root
+
+
+    def sample_parses(self, tokens, embedding, mask):
+
+        num_sentences, num_tokens = tokens.shape
+
+        # Adjust the probabilities to make p~
+        probs = torch.exp(embedding.sentence_link_energy(tokens, mask))
+        probs[:,:,0] = 1
+        probs = self.get_tilde_probs(probs, mask)
+        epsilon = torch.full((num_sentences, 1), 1.0)
+        probs[:,:,0] = epsilon
+
+        # Various pointers and booleans track the state of tokens and sentences.
+        state = self.init_state(num_tokens, num_sentences, mask)
+        tree, intree, leaf_ptr, head_ptr, has_root = state
+        done = intree.all(dim=1)
+
+        per_sentence = torch.arange(num_sentences)
+        i = 0
+        while not done.all():
+
+            # In each sentence, the token head_ptr choses a next head.
+            next_head_ptr = torch.distributions.Categorical(
+                probs[per_sentence, head_ptr]).sample()
+            tree[per_sentence, head_ptr] = next_head_ptr
+            head_ptr = next_head_ptr
+
+            # If multiple tokens in a sentence choose root, restart parsing of
+            # that sentence (reinitialize the state data associated to it).
+            chose_root = (next_head_ptr == 0)
+            needs_reset = chose_root.logical_and(
+                has_root).logical_and(done.logical_not())
+            has_root[chose_root] = True
+            if needs_reset.any():
+                epsilon[needs_reset] = epsilon[needs_reset] / 2
+                probs[needs_reset,:,0] = epsilon[needs_reset]
+                tree[needs_reset] = torch.full(
+                    (needs_reset.sum(), num_tokens), -1)
+                tree[:,0] = 0
+                tree[mask] = 0
+                intree[needs_reset] = False
+                intree[:,0] = True
+                intree[mask] = True
+                leaf_ptr[needs_reset] = torch.distributions.Categorical(
+                    intree[needs_reset].logical_not()).sample()
+                head_ptr[needs_reset] = leaf_ptr[needs_reset]
+                has_root[needs_reset] = False
+
+            # Whenever a next head is chosen that is intree, mark everything
+            # from leaf_ptr to next_head_ptr as intree.  Some sentences will
+            # have longer paths than others, but ones that reach ROOT first will
+            # cycle harmlessly there.
+            anchored = intree[per_sentence, next_head_ptr]
+            if anchored.any():
+                while not intree[anchored, leaf_ptr[anchored]].all():
+                    intree[anchored, leaf_ptr[anchored]] = True
+                    leaf_ptr[anchored] = tree[anchored, leaf_ptr[anchored]]
+
+                done = intree.all(dim=1)
+                needs_ptr_reset = anchored.logical_and(done.logical_not())
+                leaf_ptr[needs_ptr_reset] = torch.distributions.Categorical(
+                    intree[needs_ptr_reset].logical_not()).sample()
+                head_ptr[needs_ptr_reset] = leaf_ptr[needs_ptr_reset]
+                # Any sentence that has a viable tree is forced into the
+                # absorbing state.
+                leaf_ptr[done] = 0
+                head_ptr[done] = 0
+
+        assert not (tree == -1).any(), "parse invalid."
+        return tree
+
+            
+    def get_tilde_probs(self, probs, mask):
+        out_weights = probs.sum(dim=2)
+        max_out_weight = out_weights.max(dim=1, keepdim=True).values
+        needed_self_weight = max_out_weight - out_weights
+        probs = probs + torch.diag_embed(needed_self_weight, dim1=1, dim2=2)
+        probs[:,0,0] = 1
+        probs[mask.unsqueeze(1).expand(probs.shape)] = 0
+        return probs
+
+
+class RandomTree:
+    """
+    As listed on p.204 of Propp and Wilson's "How to get a perfectly random 
+    sample from a generic markov chain and generate a random spanning tree of
+    a directed graph", implemented to work on multiple sentences in parallel.
+    """
+
+    def sample_parses(
+        self, tokens_batch, embedding, mask, start_temp=1, temp_step=0.1
+    ):
+
+        num_sentences, num_tokens = tokens_batch.shape
+
+        # Track which nodes are "intree" (have a path to ROOT), and which nodes 
+        # are "rooting" (part of on an actively growing branch).
+        intree = torch.zeros_like(tokens_batch, dtype=torch.bool)
+        intree[mask] = True
+        intree[:,0] = True
+
+        # Encode the partial parse structure as a choice of head by each token.
+        head_ptrs = torch.full_like(tokens_batch, -1)
+        head_ptrs[mask] = 0
+        head_ptrs[:,0] = 0
+
+        # Heads are chosen randomly with probability based on link energy.
+        energy = embedding.sentence_link_energy(tokens_batch, mask)
+        # The probability that any given node chooses root is the same for
+        # all tokens in a sentence, given by epsilon.  Although all tokens in 
+        # the sentence have the same epsilon, different sentences have
+        # different epsilons.
+        epsilon = torch.full((num_sentences, 1), 1.0)
+
+        # Keep track of whether a given sentence has root.
+        has_root = torch.zeros((num_sentences,1), dtype=torch.bool)
+        done = torch.zeros((num_sentences, 1), dtype=torch.bool)
+
+        # We continually take "jaunts" of several steps starting from a sub_ptr.
+        # During the juant, our position is stored in head_ptr.
+        # To start with, pick a random sub_ptr (and this is where head_ptr
+        # starts too.
+        ptr_sampler = torch.distributions.Categorical(intree.logical_not())
+        ptr = ptr_sampler.sample().unsqueeze(1)
+        head_ptr = ptr.clone()
+
+        # In each sentence, the "active" node chosen is considered in "rooting"  
+        per_sentence = torch.arange(num_sentences)
+        temp = start_temp - temp_step
+
+        while not done.all():
+
+            temp += temp_step
+
+            head_probs = self.get_tilde_probs(energy / temp, epsilon, mask)
+
+            next_head_ptr = torch.distributions.Categorical(
+                head_probs[per_sentence, head_ptr.squeeze(1)]
+            ).sample().unsqueeze(1)
+            head_ptrs[per_sentence, head_ptr.squeeze(1)] = (
+                next_head_ptr.squeeze(1))
+
+            # Is any head_ptr pointing to a node that is intree?
+            chose_intree = intree.gather(dim=1, index=next_head_ptr)
+            intree = self.update_intree(intree, chose_intree, ptr, head_ptrs)
+
+            # Did any sentence choose ROOT for a second time?
+            # If so, reset intree (start building tree from scratch) and 
+            # cut the chance of selecting root in half.
+            chose_root = (next_head_ptr == 0)
+            double_root = chose_root.logical_and(
+                has_root).logical_and(done.logical_not()).squeeze(1)
+            has_root = has_root.logical_or(chose_root)
+            has_root[double_root] = False
+            intree[double_root] = False
+            intree[double_root] = mask[double_root]
+            intree[:,0] = True
+            epsilon[double_root] = epsilon[double_root] / 2
+            energy[:,:,0] = epsilon
+
+            # if done, harmlessly set ptr to ROOT.
+            done = intree.all(dim=1, keepdim=True)
+            head_ptr[done] = 0
+
+            # If chose_intree and not done, sample a new pointer
+            needs_ptr_reset = (
+                done.logical_not().logical_and(chose_intree).squeeze(1))
+            ptr_sampler = torch.distributions.Categorical(
+                intree[needs_ptr_reset].logical_not())
+            ptr[needs_ptr_reset] = ptr_sampler.sample().unsqueeze(1)
+            head_ptr[needs_ptr_reset] = ptr[needs_ptr_reset]
+
+            # Otherwise set the new head_ptr to next_head_ptr
+            proceed = done.logical_not().logical_and(chose_intree.logical_not())
+            head_ptr[proceed] = next_head_ptr[proceed]
+
+        return head_ptrs
+
+
+    def get_tilde_probs(self, energy, epsilon, mask):
+        probs = torch.exp(energy)
+        probs[:,:,0] = epsilon
+        out_weight = probs.sum(dim=2)
+        max_out_weight = out_weight.max(dim=1, keepdim=True).values
+        add_weight = max_out_weight - out_weight
+        probs = probs + torch.diag_embed(add_weight, dim1=1, dim2=2)
+        probs[mask.unsqueeze(1).expand(probs.shape)] = 0
+        probs[:,0,0] = 1
+        return probs
+
+
+    def update_intree(self, intree, chose_intree, ptr, head_ptrs):
+        # Walk from ptr to intree, marking tokens as intree.
+        # Once a sentence reaches ROOT, it stays there because root is it's own
+        # head, harmlessly marking ROOT as intree (it's default).  Once all
+        # this_ptrs have reach an token that is already intree, stop updating.
+        chose_intree_index = chose_intree.squeeze(1)
+        this_ptr = ptr[chose_intree_index]
+        traced = intree[chose_intree_index].gather(dim=1, index=this_ptr)
+        while not traced.all():
+            intree[chose_intree_index, this_ptr.squeeze(1)] = True
+            this_ptr = head_ptrs[chose_intree_index].gather(
+                dim=1, index=this_ptr)
+            traced = intree[
+                chose_intree.squeeze(1)].gather(dim=1, index=this_ptr)
+        return intree
 
 

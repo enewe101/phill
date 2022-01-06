@@ -5,18 +5,23 @@ from torch import nn
 
 class EmbeddingLayer(nn.Module):
 
-    def __init__(self, vocab_size, embedding_dimension):
+    def __init__(self, vocab_size, embedding_dimension, bias=None):
         super().__init__()
         self.U = nn.Parameter(
             torch.randn(vocab_size, embedding_dimension)
             *1/torch.sqrt(torch.tensor(embedding_dimension))
         )
-        self.Ubias = nn.Parameter(torch.randn(vocab_size, 1))
+        if bias is None:
+            self.Ubias = nn.Parameter(torch.randn(vocab_size, 1))
+            self.Vbias = nn.Parameter(torch.randn(vocab_size, 1))
+        else:
+            self.Ubias = nn.Parameter(bias)
+            self.Vbias = nn.Parameter(bias)
+
         self.V = nn.Parameter(
             torch.randn(vocab_size, embedding_dimension)
             *1/torch.sqrt(torch.tensor(embedding_dimension))
         )
-        self.Vbias = nn.Parameter(torch.randn(vocab_size, 1))
 
 
     def head_match(self, token_id, k=5):
@@ -27,9 +32,7 @@ class EmbeddingLayer(nn.Module):
         similarity = (self.U @ self.U[token_id])
         most_similar = similarity.topk(k+1).indices.tolist()
         most_similar_nonidentical = [
-            elm for elm in most_similar 
-            if elm != token_id
-        ][:k]
+            elm for elm in most_similar if elm != token_id][:k]
         return most_similar_nonidentical
 
 

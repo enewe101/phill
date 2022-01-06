@@ -7,6 +7,7 @@ from torch.utils.data import Dataset
 import model as m
 
 
+
 def parse_sentences_by_length(path):
     with open(path, 'r') as infile:
         return parse_sentences_by_length_(infile)
@@ -166,6 +167,7 @@ class PaddedDatasetParallel(Dataset):
             path,
             padding=0,
             min_length=0,
+            max_length=None,
             has_heads=False,
             has_relations=False,
             approx_chunk_size=100*m.const.KB,
@@ -175,6 +177,7 @@ class PaddedDatasetParallel(Dataset):
         self.path = path
         self.padding = padding
         self.min_length = min_length
+        self.max_length = max_length
         self.has_heads = has_heads
         self.has_relations = has_relations
         self.vocab_limit = vocab_limit
@@ -182,7 +185,7 @@ class PaddedDatasetParallel(Dataset):
         # Build the dictionaries
         self.dictionary = m.Dictionary(
             self.tokens_path(), vocab_limit=vocab_limit)
-        self.Px = self.calculate_Px()
+        self.Nx = self.calculate_Nx()
         self.relations_dictionary = None
         if has_relations:
             self.relations_dictionary = m.Dictionary(self.relations_path())
@@ -192,7 +195,7 @@ class PaddedDatasetParallel(Dataset):
         self.num_chunks = math.ceil(total_bytes / approx_chunk_size)
 
 
-    def calculate_Px(self):
+    def calculate_Nx(self):
 
         Nx = torch.tensor(self.dictionary.counts)
 
@@ -202,9 +205,9 @@ class PaddedDatasetParallel(Dataset):
             Nx_limited = Nx[:self.vocab_limit]
             Nx_cut_weight = Nx.sum() - Nx_limited.sum()
             Nx_limited[self.dictionary.get_id("<UNK>")] += Nx_cut_weight
-            Nx = Nx_limited
+            return Nx_limited
 
-        return Nx / Nx.sum()
+        return Nx
 
     def tokens_path(self):
         return os.path.join(self.path, "tokens.dict")
@@ -226,40 +229,73 @@ class PaddedDatasetParallel(Dataset):
 
         # parse the chunks into lists of variably-sized lists of symbols.
         parsed_batch = self.parse(lines)
-        tokens_batch, head_ptrs_batch, relations_batch, max_length = parsed_batch
+        tokens_batch, head_ptrs_batch, relations_batch = parsed_batch
+        num_sentences = len(tokens_batch)
 
-        # Add padding and tensorfy the data.
-        pad_tokens_batch = self.pad_tensorfy(tokens_batch, max_length)
-        mask = self.get_mask(tokens_batch, max_length)
-        pad_head_ptrs_batch = None
+        # Sort based on sentence length
+        lengths = [(len(tokens), i) for i, tokens in enumerate(tokens_batch)]
+        lengths.sort()
+        sorter = [i for length, i in lengths]
+        tokens_batch = [tokens_batch[i] for i in sorter]
+
+        # Break sentences up based on length to reduce total padded size.
+        cutoff = int(math.floor(0.95 * len(tokens_batch)))
+
+        # Pad and tensorify
+        max_short_length = lengths[cutoff-1][0]
+        max_length = lengths[-1][0]
+        tokens_batch = [
+            self.pad_tensorfy(tokens_batch[:cutoff], max_short_length),
+            self.pad_tensorfy(tokens_batch[cutoff:], max_length)
+        ]
+
+        # Make mask
+        mask = [
+            self.get_mask(tokens_batch[0], max_short_length),
+            self.get_mask(tokens_batch[1], max_length)]
+
+        # Sort, break, pad, and tensorify head_ptrs_batch as desired.
+        # Otherwise use empty tensor: it is acceptable for dataloader.
+        head_ptrs_batch = torch.tensor([])
         if self.has_heads:
-            pad_head_ptrs_batch = self.pad_tensorfy(
-                head_ptrs_batch, max_length)
-        pad_relations_batch = None
-        if self.has_relations:
-            pad_relations_batch = self.pad_tensorfy(
-                relations_batch, max_length)
+            head_ptrs_batch = [head_ptrs_batch[i] for i in sorter]
+            head_ptrs_batch = [
+                head_ptrs_batch[:cutoff], head_ptrs_batch[cutoff:]]
+            head_ptrs_batch = [
+                self.pad_tensorfy(head_ptrs_batch[0], max_short_length),
+                self.pad_tensorfy(head_ptrs_batch[1], max_length)]
 
-        return pad_tokens_batch, pad_head_ptrs_batch, pad_relations_batch, mask
+        # Sort, break, pad, and tensorify relations_batch as desired.
+        # Otherwise use empty tensor: it is acceptable for dataloader.
+        relations_batch = torch.tensor([])
+        if self.has_relations:
+            relations_batch = [relations_batch[i] for i in sorter]
+            relations_batch = [
+                relations_batch[:cutoff], relations_batch[cutoff:]]
+            relations_batch = [
+                self.pad_tensorfy(relations_batch[0], max_short_length),
+                self.pad_tensorfy(relations_batch[1], max_length)]
+
+        return tokens_batch, head_ptrs_batch, relations_batch, mask
 
 
     def parse(self, lines):
         tokens_batch = []
         head_ptrs_batch = [] if self.has_heads else None
         relations_batch = [] if self.has_relations else None
-        max_length = 0
         for line in lines:
             tokens, head_ptrs, relations = self.parse_line(line)
             length = len(tokens)
             if length < self.min_length:
                 continue
-            max_length = max(max_length, length)
+            if length > self.max_length:
+                continue
             tokens_batch.append(tokens)
             if self.has_heads:
                 head_ptrs_batch.append(head_ptrs)
             if self.has_relations:
                 relations_batch.append(relations)
-        return tokens_batch, head_ptrs_batch, relations_batch, max_length
+        return tokens_batch, head_ptrs_batch, relations_batch
 
 
     def get_mask(self, batch, pad_to):
@@ -302,7 +338,7 @@ class PaddedDatasetParallel(Dataset):
 
     def __getitem__(self, idx):
         try:
-            return self.read(idx)
+            return self.read(idx) + (idx,)
         except ValueError:
             raise IndexError(f"No such index in dataset: {idx}")
 

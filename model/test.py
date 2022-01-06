@@ -804,6 +804,14 @@ class QuadTreeCounter:
 
 class ParseSamplingMeasureTests(TestCase):
 
+    def test_random_tree_uniform(self):
+        sampler = m.sp.RandomTree()
+        self.uniform_test(sampler)
+
+    def test_contention_uniform(self):
+        sampler = m.sp.ContentionParseSampler()
+        self.uniform_test(sampler)
+
     def test_contention_uniform(self):
         sampler = m.sp.ContentionParseSampler()
         self.uniform_test(sampler)
@@ -861,6 +869,14 @@ class ParseSamplingMeasureTests(TestCase):
             atol=0.0035
         ))
 
+    def test_random_tree_nonuniform(self):
+        sampler = m.sp.SimpleRandomTree()
+        self.nonuniform_test(sampler)
+
+    def test_walk_nonuniform(self):
+        sampler = m.sp.WalkSampler()
+        self.nonuniform_test(sampler)
+
     def test_contention_nonuniform(self):
         sampler = m.sp.ContentionParseSampler()
         self.nonuniform_test(sampler)
@@ -870,16 +886,95 @@ class ParseSamplingMeasureTests(TestCase):
         self.nonuniform_test(sampler)
 
 
-    def get_tree_probs(self, trees, embedding, tokens_batch, mask):
+
+
+
+    def test_random_tree_algorithm(self):
+        seed_random(0)
+
+        start = time.time()
+        vocab = 5
+        num_samples = 10000
+
+        # Embedding layer random.  Each tree should have a probability 
+        # proportional to its energy
+        embedding = m.EmbeddingLayer(vocab,4)
+
+        tokens = torch.tensor([[0,1,2,3,PAD,PAD,PAD]])
+        mask = torch.tensor([[0,0,0,0,1,1,1]], dtype=torch.bool)
+
+        sentence_energy = embedding.sentence_link_energy(tokens, mask=mask)
+        sentence_energy[:,:,0] = 0
+
+        trees = torch.tensor([
+            [0,0,1,2,PAD,PAD,PAD],
+            [0,0,3,1,PAD,PAD,PAD],
+            [0,0,1,1,PAD,PAD,PAD],
+            [0,2,0,1,PAD,PAD,PAD],
+            [0,3,0,2,PAD,PAD,PAD],
+            [0,2,0,2,PAD,PAD,PAD],
+            [0,2,3,0,PAD,PAD,PAD],
+            [0,3,1,0,PAD,PAD,PAD],
+            [0,3,3,0,PAD,PAD,PAD],
+        ])
+        num_trees, num_tokens = trees.shape
+
+        tree_energies = (
+            sentence_energy.expand((num_trees, -1, -1)).gather(
+                dim=2, index=trees.unsqueeze(2))).sum(dim=2).sum(dim=1)
+
+        expected_tree_probs = torch.exp(tree_energies)
+        expected_tree_probs = expected_tree_probs / expected_tree_probs.sum()
+
+        probs = torch.exp(sentence_energy).expand(
+            (num_samples, num_tokens, num_tokens)).clone()
+        mask = mask.expand(num_samples, num_tokens)
+        tokens = tokens.expand(num_samples, num_tokens)
+
+        random_tree_sampler = m.sp.SimpleRandomTree()
+        tree_counter = {tuple(row) : 0 for row in trees.tolist()}
+
+        start = time.time()
+        found_trees = random_tree_sampler.sample_parses(tokens, embedding, mask)
+        elapsed = time.time() - start
+        print("elapsed", elapsed)
+        for i in range(num_samples):
+            tree_counter[tuple(found_trees[i].tolist())] += 1
+
+        found_tree_probs = torch.tensor([
+            tree_counter[tuple(tree)] / num_samples
+            for tree in trees.tolist()
+        ])
+        zipped = zip(found_tree_probs.tolist(), expected_tree_probs.tolist())
+        for found, expected in zipped:
+            print(f"{found:.4f}\t{expected:.4f}")
+
+        self.assertTrue(torch.allclose(
+            found_tree_probs, expected_tree_probs, atol=3e-3))
+
+
+    def get_tree_probs(
+        self,
+        trees,
+        embedding,
+        tokens_batch,
+        mask,
+        score_head_root=True
+    ):
         trees_tensor = torch.zeros(
             (len(trees), tokens_batch.shape[0]), dtype=torch.long)
-        trees_tensor[:,:-mask.sum()] = torch.tensor(trees)
+        trees_tensor[:,:len(trees[0])] = torch.tensor(trees)
         tokens_batch = tokens_batch.unsqueeze(0).expand((len(trees), -1))
+        mask = mask.unsqueeze(0).expand((len(trees), -1))
         energies = embedding.link_energy(
             tokens_batch.expand(len(trees), -1),
-            trees_tensor
+            trees_tensor,
+            mask=mask
         )
-        # energies[:,0] = 0 # It's not clear if we should do this or not
+        if not score_head_root:
+            sentence_heads = (trees_tensor == 0)
+            energies[sentence_heads] = 0
+
         expected_probs = torch.exp(energies.sum(dim=1))
         expected_probs = expected_probs / expected_probs.sum()
 
@@ -892,7 +987,7 @@ class ParseSamplingMeasureTests(TestCase):
 
         start = time.time()
         vocab = 5
-        num_sentences = 500000
+        num_sentences = 10000
 
         # Embedding layer random.  Each tree should have a probability 
         # proportional to its energy
@@ -928,7 +1023,12 @@ class ParseSamplingMeasureTests(TestCase):
 
         # Calculate expected probabilities.
         expected_probs = self.get_tree_probs(
-            tree_counter.trees, embedding, tokens_batch[0], mask[0])
+            tree_counter.trees,
+            embedding,
+            tokens_batch[0],
+            mask[0],
+            score_head_root = False
+        )
         expected_el_probs = expected_probs[torch.tensor(tree_counter.el_trees)]
         expected_j_probs = expected_probs[torch.tensor(tree_counter.j_trees)]
         expected_h_probs = expected_probs[torch.tensor(tree_counter.h_trees)]
@@ -936,14 +1036,15 @@ class ParseSamplingMeasureTests(TestCase):
 
         # The frequencies should be uniform and all close to 1 / num_trees:
         torch.set_printoptions(sci_mode=False)
-        #print("Elapsed:", elapsed)
-        #print((found_probs - expected_probs).abs().mean())
-        #print(found_probs)
-        #print(expected_probs)
+        print("Elapsed:", elapsed)
+        print((found_probs - expected_probs).abs().max())
+        for fprob, eprob in zip(found_probs.tolist(), expected_probs.tolist()):
+            print(f"{fprob:.4f}\t{eprob:.4f}")
+        pdb.set_trace()
         self.assertTrue(torch.allclose(
             found_probs,
             expected_probs,
-            atol=0.011
+            atol=0.007
         ))
 
 

@@ -23,7 +23,7 @@ class Dictionary:
             idx = self.tokens_2_ids.get(token, "<UNK>")
         else:
             idx = self.tokens_2_ids[token]
-        if idx >= self.vocab_limit:
+        if self.vocab_limit is not None and self.vocab_limit < idx:
             idx = self.tokens_2_ids["<UNK>"]
         return idx
 
@@ -33,7 +33,7 @@ class Dictionary:
 
 
     def get_token(self, idx, safe=False):
-        if self.vocab_limit is not None and idx >= self.vocab_limit:
+        if self.vocab_limit is not None and self.vocab_limit < idx :
             return "<UNK>"
         try:
             return self.ids_2_tokens[idx]
