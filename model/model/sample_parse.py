@@ -4,7 +4,6 @@ import pdb
 import model as m
 
 
-
 class ContentionParseSampler():
 
     def sample_parses(
@@ -71,6 +70,7 @@ class ContentionParseSampler():
         # Determine which sentences have more than one root.
         has_multiple_roots = rooted.sum(dim=1, keepdim=True) > 1
         return torch.where(has_multiple_roots, rooted, False)
+
 
     def has_cycle(self, heads):
         """
@@ -368,7 +368,7 @@ class CycleProofRootingParseSampler:
         self, rooting, rooted, chose_rooted, chose_ROOT, fully_rooted, mask
     ):
         # If you chose ROOT, then clear what was previously rooted.
-        new_rooted = torch.where(chose_root, False, rooted)
+        new_rooted = torch.where(chose_ROOT, False, rooted)
         # If you chose a rooted token, then add rooting to rooted.
         new_rooted = torch.where(
             chose_rooted, new_rooted.logical_or(rooting), new_rooted)

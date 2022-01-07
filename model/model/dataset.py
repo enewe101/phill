@@ -8,166 +8,13 @@ import model as m
 
 
 
-def parse_sentences_by_length(path):
-    with open(path, 'r') as infile:
-        return parse_sentences_by_length_(infile)
-
-
-def parse_sentences_by_length_(lines_generator):
-    """
-    lines_generator could be a file open for reading, or list of strings.
-    anything that is iterable and yields strings.
-    """
-
-    # We'll need to sort sentences together by length in order minimize 
-    # padding.  Use a defaultdict to index lists of sentences by length.
-    token_chunks = defaultdict(list)
-    head_chunks = defaultdict(list)
-    relation_chunks = defaultdict(list)
-    for line in lines_generator:
-
-        tokens, heads, relations = parse_line(line)
-
-        # The tokens, heads, and relations are parallel arrays with each
-        # entry describing a words relationship to the sentence.
-        # gather the information on a per-word basis:
-        token_chunks[len(tokens)].append(tokens)
-        head_chunks[len(heads)].append(heads)
-        relation_chunks[len(relations)].append(relations)
-
-    return token_chunks, head_chunks, relation_chunks
-
-
-def parse_line(line):
-    tokens, heads, relations = line.split(";")
-    tokens = [int(tokenId) for tokenId in tokens.split(",")]
-    heads = [int(headPos) for headPos in heads.split(",")]
-    relations = [int(relationId) for relationId in relations.split(",")]
-    return tokens, heads, relations
-
-
-class LengthGroupedDataset(Dataset):
-
-    def __init__(self, path):
-        self.path = path
-        self.dictionary = None
-        self.read()
-
-
-    def tokens_path(self):
-        return os.path.join(self.path, "tokens.dict")
-
-    def sentences_path(self):
-        return os.path.join(self.path, "sentences.index")
-
-    def read(self):
-
-        self.dictionary = m.Dictionary(self.tokens_path())
-        chunks = parse_sentences_by_length(self.sentences_path())
-        token_chunks, head_chunks, relation_chunks = chunks
-
-        # Tensorify the chunks grouping tokens, heads, and labels together
-        # based on sentence length
-        self.data = [
-            (
-                torch.tensor(token_chunks[length]),
-                torch.tensor(head_chunks[length]), 
-                torch.tensor(relation_chunks[length])
-            )
-            for length in token_chunks.keys()
-        ]
-
-
-    def __getitem__(self, idx):
-        return self.data[idx]
-
-
-    def __len__(self):
-        return len(self.data)
-
-
-
-class PaddedDataset(Dataset):
-
-    def __init__(self, path, padding=0, batch_size=500, min_length=0):
-        self.path = path
-        self.padding = padding
-        self.batch_size = batch_size
-        self.min_length = min_length
-        self.dictionary = None
-        self.read()
-
-    def tokens_path(self):
-        return os.path.join(self.path, "tokens.dict")
-
-    def sentences_path(self):
-        return os.path.join(self.path, "sentences.index")
-
-    def read(self):
-
-        self.dictionary = m.Dictionary(self.tokens_path())
-        chunks = parse_sentences_by_length(self.sentences_path())
-        token_chunks, head_chunks, relation_chunks = chunks
-        self.data = []
-
-        tokens_batch, heads_batch, relations_batch = [],[],[]
-        for length in sorted(token_chunks.keys()):
-            for i in range(len(token_chunks[length])):
-                if length < self.min_length:
-                    continue
-
-                tokens_batch.append(token_chunks[length][i])
-                heads_batch.append(head_chunks[length][i])
-                relations_batch.append(relation_chunks[length][i])
-
-                if len(tokens_batch) == self.batch_size:
-                    self.pad_append(
-                        length, tokens_batch, heads_batch, relations_batch)
-                    tokens_batch, heads_batch, relations_batch = [], [], []
-
-        if len(tokens_batch) > 0:
-            self.pad_append(
-                length, tokens_batch, heads_batch, relations_batch)
-
-    def pad_append(self, length, tokens_batch, heads_batch, relations_batch):
-        padding_mask = self.get_padding_mask(length, tokens_batch)
-        self.data.append((
-            torch.tensor(self.pad(length, tokens_batch)),
-            torch.tensor(self.pad(length, heads_batch)),
-            torch.tensor(self.pad(length, relations_batch)),
-            torch.tensor(self.get_padding_mask(length, tokens_batch))
-        ))
-
-
-    def get_padding_mask(self, length, symbols_batch):
-        return [
-            [False] * len(symbols) + [True] * (length - len(symbols))
-            for symbols in symbols_batch
-        ]
-
-
-    def pad(self, length, symbols_batch):
-        return [
-            symbols + [self.padding] * (length - len(symbols))
-            for symbols in symbols_batch
-        ]
-
-
-    def __getitem__(self, idx):
-        return self.data[idx]
-
-
-    def __len__(self):
-        return len(self.data)
-
-
 class PaddedDatasetParallel(Dataset):
 
     def __init__(self,
             path,
             padding=0,
             min_length=0,
-            max_length=None,
+            max_length=140,
             has_heads=False,
             has_relations=False,
             approx_chunk_size=100*m.const.KB,
@@ -222,73 +69,100 @@ class PaddedDatasetParallel(Dataset):
     def read(self, chunk_num):
         file_chunk = m.file.open_chunk(
             self.sentences_path(), chunk_num, self.num_chunks)
-        return self.parse_pad_tensorfy(file_chunk)
+        return self.prepare_chunk(file_chunk)
 
 
-    def parse_pad_tensorfy(self, lines):
-
+    def prepare_chunk(self, lines):
+        """
+        Given an iterable source of lines (e.g. a file or file chunk)
+        parse the sentence data therein, and generate tensorfied batches
+        of sentence data.
+        """
         # parse the chunks into lists of variably-sized lists of symbols.
         parsed_batch = self.parse(lines)
-        tokens_batch, head_ptrs_batch, relations_batch = parsed_batch
-        num_sentences = len(tokens_batch)
 
-        # Sort based on sentence length
-        lengths = [(len(tokens), i) for i, tokens in enumerate(tokens_batch)]
-        lengths.sort()
-        sorter = [i for length, i in lengths]
-        tokens_batch = [tokens_batch[i] for i in sorter]
+        # Split the batch based on sentence length.
+        short_batch, long_batch = self.split_batch(parsed_batch)
 
-        # Break sentences up based on length to reduce total padded size.
-        cutoff = int(math.floor(0.95 * len(tokens_batch)))
+        # Tensorify the sub-batches, and create a mask.
+        finished_batches = []
+        for batch in (short_batch, long_batch):
+            if len(batch[0]) == 0:
+                mask = []
+                finished_batches.append(batch + [mask])
+                continue
 
-        # Pad and tensorify
-        max_short_length = lengths[cutoff-1][0]
-        max_length = lengths[-1][0]
-        tokens_batch = [
-            self.pad_tensorfy(tokens_batch[:cutoff], max_short_length),
-            self.pad_tensorfy(tokens_batch[cutoff:], max_length)
-        ]
+            # Assumes sorted by increasing length.
+            max_length = len(batch[0][-1])
+            finished_batch = [
+                self.pad_tensorfy(symbol_batch, max_length) 
+                for symbol_batch in batch
+            ]
+            finished_batch.append(self.get_mask(batch[0], max_length))
+            finished_batches.append(finished_batch)
 
-        # Make mask
-        mask = [
-            self.get_mask(tokens_batch[0], max_short_length),
-            self.get_mask(tokens_batch[1], max_length)]
+        return finished_batches
 
-        # Sort, break, pad, and tensorify head_ptrs_batch as desired.
-        # Otherwise use empty tensor: it is acceptable for dataloader.
-        head_ptrs_batch = torch.tensor([])
-        if self.has_heads:
-            head_ptrs_batch = [head_ptrs_batch[i] for i in sorter]
-            head_ptrs_batch = [
-                head_ptrs_batch[:cutoff], head_ptrs_batch[cutoff:]]
-            head_ptrs_batch = [
-                self.pad_tensorfy(head_ptrs_batch[0], max_short_length),
-                self.pad_tensorfy(head_ptrs_batch[1], max_length)]
 
-        # Sort, break, pad, and tensorify relations_batch as desired.
-        # Otherwise use empty tensor: it is acceptable for dataloader.
-        relations_batch = torch.tensor([])
-        if self.has_relations:
-            relations_batch = [relations_batch[i] for i in sorter]
-            relations_batch = [
-                relations_batch[:cutoff], relations_batch[cutoff:]]
-            relations_batch = [
-                self.pad_tensorfy(relations_batch[0], max_short_length),
-                self.pad_tensorfy(relations_batch[1], max_length)]
+    def sort_split(self, symbols_batch, sorter=None, split_at=0.95):
+        """
+        Given a symbols_batch, sort it by length, or by `sorter` if provided,
+        and then split the batch into short and long, by splitting at the
+        95th percentile of sentence lengths.  The symbols batch will be returned
+        length-sorted or sorted by `sorter`.  Sorter is a permutation, a list
+        of indices, whose ith position holds the index of the sentence that
+        shoud appear in position i.
+        """
+        cutoff = int(math.ceil(0.95 * len(symbols_batch)))
+        if sorter is None:
+            lengths = [
+                (len(tokens), i) for i, tokens in enumerate(symbols_batch)]
+            lengths.sort()
+            sorter = [i for length, i in lengths]
+        sorted_symbols_batch = [symbols_batch[i] for i in sorter]
+        split_symbol_batch = (
+            sorted_symbols_batch[:cutoff],
+            sorted_symbols_batch[cutoff:]
+        )
+        return split_symbol_batch, sorter
 
-        return tokens_batch, head_ptrs_batch, relations_batch, mask
+
+
+    def split_batch(self, batch):
+        """
+        Given batch, a tuple of various types of symbol-batches, generate
+        two batches, by breaking each of the symbol-batches in two.
+        Don't split the symbol batches evenly, sort them by 
+        sentence-length, and then split into short and long, where long is the
+        top 5% by length of sentences, and short has the bulk of the sentences.
+        """
+        # Split each of the symbols batches based on sentence length, and 
+        # group them into separate batches.
+        sorter = None
+        short_batch, long_batch = [],[]
+        for symbols_batch in batch:
+            if symbols_batch is None:
+                short_batch.append([])
+                long_batch.append([])
+            else:
+                split_batch, sorter = self.sort_split(symbols_batch, sorter)
+                short_batch.append(split_batch[0])
+                long_batch.append(split_batch[1])
+        return (short_batch, long_batch)
 
 
     def parse(self, lines):
+        """
+        Given an iterable of lines (e.g. a file or file chunk), parse the 
+        lines into a series of three symbol-batches.
+        """
         tokens_batch = []
         head_ptrs_batch = [] if self.has_heads else None
         relations_batch = [] if self.has_relations else None
         for line in lines:
             tokens, head_ptrs, relations = self.parse_line(line)
             length = len(tokens)
-            if length < self.min_length:
-                continue
-            if length > self.max_length:
+            if length < self.min_length or length > self.max_length:
                 continue
             tokens_batch.append(tokens)
             if self.has_heads:
@@ -299,6 +173,11 @@ class PaddedDatasetParallel(Dataset):
 
 
     def get_mask(self, batch, pad_to):
+        """
+        Given an example symbol_batch having sentences of different length,
+        generate the bolean mask which will be true wherever padding cells
+        are added to tensorfy batch by padding up to pad_to.
+        """
         mask = torch.ones((len(batch), pad_to), dtype=torch.bool)
         for i in range(len(batch)):
             mask[i][:len(batch[i])] = False
@@ -306,6 +185,10 @@ class PaddedDatasetParallel(Dataset):
 
 
     def pad_tensorfy(self, batch, pad_to):
+        """
+        Given a symbol batch, convert it into a tensor, by padding every 
+        sentence up to pad_to length.
+        """
         pad_batch = torch.empty((len(batch), pad_to), dtype=torch.long)
         for i in range(len(batch)):
             pad_length_needed = pad_to - len(batch[i])
@@ -315,7 +198,11 @@ class PaddedDatasetParallel(Dataset):
 
 
     def parse_line(self, line):
-
+        """
+        Given a single line of text (a string), parse out the token ids, 
+        head-assignments, and relation ids.  Token ids outside of vocab_limit
+        are converted to the id corresponding to the "<UNK>" token.
+        """
         parsed_line = line.split(";")
         tokens = [int(t) for t in parsed_line[0].split(",")]
 
@@ -338,7 +225,7 @@ class PaddedDatasetParallel(Dataset):
 
     def __getitem__(self, idx):
         try:
-            return self.read(idx) + (idx,)
+            return self.read(idx), idx
         except ValueError:
             raise IndexError(f"No such index in dataset: {idx}")
 

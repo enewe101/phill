@@ -13,7 +13,7 @@ class Dictionary:
 
     def __len__(self):
         length = len(self.ids_2_tokens)
-        if self.vocab_limit is not None and self.vocab_limit < length:
+        if self.vocab_limit is not None and length > self.vocab_limit:
             length = self.vocab_limit
         return length
 
@@ -23,7 +23,7 @@ class Dictionary:
             idx = self.tokens_2_ids.get(token, "<UNK>")
         else:
             idx = self.tokens_2_ids[token]
-        if self.vocab_limit is not None and self.vocab_limit < idx:
+        if self.vocab_limit is not None and idx >= self.vocab_limit:
             idx = self.tokens_2_ids["<UNK>"]
         return idx
 
@@ -33,7 +33,7 @@ class Dictionary:
 
 
     def get_token(self, idx, safe=False):
-        if self.vocab_limit is not None and self.vocab_limit < idx :
+        if self.vocab_limit is not None and idx >= self.vocab_limit:
             return "<UNK>"
         try:
             return self.ids_2_tokens[idx]

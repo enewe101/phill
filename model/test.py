@@ -28,8 +28,11 @@ class TestVisualization(TestCase):
 
     def test_visualization(self):
         data_path = os.path.join(TEST_DATA_PATH, "ten-sentence-dataset")
-        data = m.PaddedDataset(data_path)
-        tokens_batch, head_ptrs_batch, relations_batch, mask_batch = data[0]
+        data = m.PaddedDatasetParallel(data_path, has_heads=True)
+        (short_batch, long_batch), batch_idx = data[0]
+
+        tokens_batch, head_ptrs_batch, relations_batch, mask_batch = short_batch
+
         tokens_batch = tokens_batch.tolist()
         head_ptrs_batch = head_ptrs_batch.tolist()
         mask_batch = mask_batch.tolist()
@@ -55,24 +58,6 @@ class DatasetTest(TestCase):
         return expected_sentences
 
 
-    def test_length_grouped_dataset(self):
-        path = os.path.join(TEST_DATA_PATH, "ten-sentence-dataset")
-        dataset = m.LengthGroupedDataset(path)
-        dataset.read()
-
-        found_sentences = set()
-        for tokens_batch, heads_batch, relations_batch in dataset:
-            for i in range(tokens_batch.shape[0]):
-                found_sentences.add(";".join([
-                    ",".join([str(t) for t in symbols.tolist()])
-                    for symbols in 
-                    (tokens_batch[i], heads_batch[i], relations_batch[i])
-                ]))
-
-        sentences_path = os.path.join(path, "sentences.index")
-        expected_sentences = self.read_expected_sentences(sentences_path)
-        self.assertTrue(found_sentences == expected_sentences)
-
 
     def test_padded_dataset_parallel_limit_vocab_Nx(self):
         path = os.path.join(TEST_DATA_PATH, "one-sentence-dataset")
@@ -89,19 +74,23 @@ class DatasetTest(TestCase):
             Nx_limit = Nx[:vocab_limit]
             cut_weight = Nx.sum() - Nx_limit.sum()
             Nx_limit[unk_id] += cut_weight
-            expected_Px = Nx_limit / Nx_limit.sum()
+            expected_Nx = Nx_limit
 
-        self.assertTrue(torch.equal(dataset.Px, expected_Px))
+        self.assertTrue(torch.equal(dataset.Nx, expected_Nx))
 
         # In the actual sentence data, we should never see tokens whose idx is
         # greater than vocab_limit
-        for batch in dataset:
-            found_tokens_batch, head_idxs_batch, relations_batch, mask = batch
-            expected_tokens_batch = torch.clone(found_tokens_batch)
-            high_ids = (expected_tokens_batch >= vocab_limit)
-            expected_tokens_batch[high_ids] = unk_id
-            self.assertTrue(torch.equal(
-                found_tokens_batch, expected_tokens_batch))
+        for split_batch in dataset:
+            batches, batch_idx = split_batch
+            for batch in batches:
+                tokens_batch, head_idxs_batch, relations_batch, mask = batch
+                if len(tokens_batch) == 0:
+                    continue
+                expected_tokens_batch = torch.clone(tokens_batch)
+                high_ids = (expected_tokens_batch >= vocab_limit)
+                expected_tokens_batch[high_ids] = unk_id
+                self.assertTrue(torch.equal(
+                    tokens_batch, expected_tokens_batch))
 
 
 
@@ -112,71 +101,45 @@ class DatasetTest(TestCase):
             approx_chunk_size=1024)
 
         found_sentences = set()
-        for items in dataset:
+        for j in range(len(dataset)):
 
             # Wherever mask is 1, the batches should be padding.
-            tokens_batch, head_ptrs_batch, relations_batch, mask_batch = items
-            torch.all(tokens_batch[mask_batch] == PAD)
-            torch.all(head_ptrs_batch[mask_batch] == PAD)
-            torch.all(relations_batch[mask_batch] == PAD)
+            batches, idx = dataset[j]
 
-            # Wherever mask is 0, the batches should contain the expected data.
-            for i in range(tokens_batch.shape[0]):
-                mask = mask_batch[i].tolist()
-                tokens = tokens_batch[i].tolist()
-                heads = head_ptrs_batch[i].tolist()
-                relations = relations_batch[i].tolist()
-                while mask[-1]:
-                    mask.pop()
-                    tokens.pop()
-                    heads.pop()
-                    relations.pop()
+            for batch in batches:
+                if len(batch[0]) == 0:
+                    continue
+                tokens_batch = batch[0]
+                head_ptrs_batch = batch[1]
+                relations_batch = batch[2]
+                mask_batch = batch[3]
 
-                found_sentences.add(";".join([
-                    ",".join([str(t) for t in symbols])
-                    for symbols in (tokens, heads, relations)
-                ]))
+                torch.all(tokens_batch[mask_batch] == PAD)
+                torch.all(head_ptrs_batch[mask_batch] == PAD)
+                torch.all(relations_batch[mask_batch] == PAD)
+
+                # Wherever mask is 0, the batches should contain the expected
+                # data.
+                for i in range(tokens_batch.shape[0]):
+                    mask = mask_batch[i].tolist()
+                    tokens = tokens_batch[i].tolist()
+                    heads = head_ptrs_batch[i].tolist()
+                    relations = relations_batch[i].tolist()
+                    while mask[-1]:
+                        mask.pop()
+                        tokens.pop()
+                        heads.pop()
+                        relations.pop()
+
+                    found_sentences.add(";".join([
+                        ",".join([str(t) for t in symbols])
+                        for symbols in (tokens, heads, relations)
+                    ]))
 
         sentences_path = os.path.join(path, "sentences.index")
         expected_sentences = self.read_expected_sentences(sentences_path)
         self.assertTrue(found_sentences == expected_sentences)
 
-
-    def test_padded_dataset(self):
-        path = os.path.join(TEST_DATA_PATH, "ten-sentence-dataset")
-        batch_size = 7
-        dataset = m.PaddedDataset(path, PAD, batch_size)
-        dataset.read()
-
-        found_sentences = set()
-        for items  in dataset:
-
-            # Wherever mask is 1, the batches should be padding.
-            tokens_batch, head_ptrs_batch, relations_batch, mask_batch = items
-            torch.all(tokens_batch[mask_batch] == PAD)
-            torch.all(head_ptrs_batch[mask_batch] == PAD)
-            torch.all(relations_batch[mask_batch] == PAD)
-
-            # Wherever mask is 0, the batches should contain the expected data.
-            for i in range(tokens_batch.shape[0]):
-                mask = mask_batch[i].tolist()
-                tokens = tokens_batch[i].tolist()
-                heads = head_ptrs_batch[i].tolist()
-                relations = relations_batch[i].tolist()
-                while mask[-1]:
-                    mask.pop()
-                    tokens.pop()
-                    heads.pop()
-                    relations.pop()
-
-                found_sentences.add(";".join([
-                    ",".join([str(t) for t in symbols])
-                    for symbols in (tokens, heads, relations)
-                ]))
-
-        sentences_path = os.path.join(path, "sentences.index")
-        expected_sentences = self.read_expected_sentences(sentences_path)
-        self.assertTrue(found_sentences == expected_sentences)
 
 
 class EmbeddingTest(TestCase):
@@ -257,7 +220,8 @@ class Word2VecModelTest(TestCase):
         num_sentences, num_tokens = tokens_batch.shape
 
         # Test the function.
-        head_ptrs = model.sample_parses(tokens_batch)
+        mask = torch.zeros(tokens_batch.shape, dtype=torch.bool)
+        head_ptrs = model.sample_parses(tokens_batch, mask)
 
         # We will check which tokens chose <ROOT> as head.
         ROOT = 0
@@ -409,84 +373,77 @@ class ParityTokenSamplerTest(TestCase):
 
         # Build the sampler, and read the batch from the dataset.  Adjust
         # padding
-        sampler = m.sp.ParityTokenSampler(dataset.Px)
-        tokens_batch, head_ptrs_batch, relations_batch, mask = dataset[0]
-        mask = (head_ptrs_batch == -1)
+        Px = dataset.Nx / dataset.Nx.sum()
+        sampler = m.sp.ParityTokenSampler(Px)
+        batches, batch_idx = dataset[0]
+
+        head_ptrs_batch = batches[0][1]
+        mask = batches[0][3]
         head_ptrs_batch[mask] = 0
 
         # Test the target function
-        found_node_parities = sampler.get_node_parity(head_ptrs_batch)
+        found_node_parities = set()
+        for node_parity in sampler.get_node_parity(head_ptrs_batch).tolist():
+            found_node_parities.add(tuple(node_parity))
 
         # These were verified by hand.
-        expected_node_parities = torch.tensor([
-            [
+        expected_node_parities = set([
+            (
                 False, True, False, False, False, False, True, False, True,
                 False, False, False, False, False, True, False, False, False,
                 True, True, True, False, False, True, True, False, False,
                 False, True, False, True, True, True, True, True, True, True
-            ],[
+            ),(
                 False, False, True, False, False, False, False, True, False,
                 False, True, False, False, True, False, False, True, False,
                 False, True, True, True, True, True, True, True, True, True,
                 True, True, True, True, True, True, True, True, True
-            ],[
+            ),(
                 False, True, False, False, True, False, False, False, False,
                 True, False, True, True, False, True, True, False, False, True,
                 True, True, True, True, True, True, True, True, True, True,
                 True, True, True, True, True, True, True, True
-            ],[
+            ),(
                 False, False, False, True, False, False, True, True, True,
                 False, False, False, True, True, True, False, False, True,
                 True, True, True, True, True, True, True, True, True, True,
                 True, True, True, True, True, True, True, True, True
-            ],[
+            ),(
                 False, True, False, False, True, False, True, True, True, True,
                 False, False, False, True, True, False, False, True, True,
                 False, False, True, False, False, False, False, True, True,
                 True, True, True, False, False, False, False, True, False
-            ],[
+            ),(
                 False, True, False, False, False, True, True, True, False,
                 False, False, False, True, False, True, True, True, True, True,
                 True, True, True, True, True, True, True, True, True, True,
                 True, True, True, True, True, True, True, True
-            ],[
+            ),(
                 False, False, True, True, True, True, False, False, True,
                 False, False, False, True, False, True, True, True, True, True,
                 True, True, True, True, True, True, True, True, True, True,
                 True, True, True, True, True, True, True, True
-            ],[
+            ),(
                 False, True, False, False, True, True, True, True, True, True,
                 True, False, False, False, False, True, False, True, True,
                 True, True, True, True, True, True, True, True, True, True,
                 True, True, True, True, True, True, True, True
-            ],[
+            ),(
                 False, True, False, True, True, True, False, False, True,
                 False, False, True, True, False, True, True, False, False,
                 False, False, False, True, True, False, False, True, False,
                 True, True, False, False, False, True, True, False, False,
                 True
-            ],[
+            ),(
                 False, False, True, False, True, False, True, True, True,
                 False, False, False, False, True, True, True, True, False,
                 True, False, False, True, True, True, True, True, True, True,
                 True, True, True, True, True, True, True, True, True
-            ]
+            )
         ])
 
-        self.assertTrue(torch.equal(
-            found_node_parities, expected_node_parities))
+        self.assertEqual(found_node_parities, expected_node_parities)
 
-        # Now add another batching dimension.  The function should simply 
-        # treat the final dimension as the dimension indexed by tree structure
-        # and should treat all others simply as batching.  So, the expected
-        # result will simply be similarly reshaped.
-        rebatched_heads = head_ptrs_batch.unsqueeze(0).expand(5,-1,-1)
-        found_node_parities = sampler.get_node_parity(rebatched_heads)
-        expected_node_parities = expected_node_parities.unsqueeze(0).expand(
-            5,-1,-1)
-        self.assertTrue(torch.equal(
-            found_node_parities, expected_node_parities))
-        
 
     @skip("Long test")
     def test_parity_token_resampler(self):
@@ -802,6 +759,7 @@ class QuadTreeCounter:
         self.tree_counter = {tree:0 for tree in self.trees}
 
 
+@skip("Long test")
 class ParseSamplingMeasureTests(TestCase):
 
     def test_random_tree_uniform(self):
@@ -937,7 +895,7 @@ class ParseSamplingMeasureTests(TestCase):
         start = time.time()
         found_trees = random_tree_sampler.sample_parses(tokens, embedding, mask)
         elapsed = time.time() - start
-        print("elapsed", elapsed)
+        #print("elapsed", elapsed)
         for i in range(num_samples):
             tree_counter[tuple(found_trees[i].tolist())] += 1
 
@@ -946,8 +904,8 @@ class ParseSamplingMeasureTests(TestCase):
             for tree in trees.tolist()
         ])
         zipped = zip(found_tree_probs.tolist(), expected_tree_probs.tolist())
-        for found, expected in zipped:
-            print(f"{found:.4f}\t{expected:.4f}")
+        #for found, expected in zipped:
+        #    print(f"{found:.4f}\t{expected:.4f}")
 
         self.assertTrue(torch.allclose(
             found_tree_probs, expected_tree_probs, atol=3e-3))
@@ -1036,11 +994,10 @@ class ParseSamplingMeasureTests(TestCase):
 
         # The frequencies should be uniform and all close to 1 / num_trees:
         torch.set_printoptions(sci_mode=False)
-        print("Elapsed:", elapsed)
-        print((found_probs - expected_probs).abs().max())
-        for fprob, eprob in zip(found_probs.tolist(), expected_probs.tolist()):
-            print(f"{fprob:.4f}\t{eprob:.4f}")
-        pdb.set_trace()
+        #print("Elapsed:", elapsed)
+        #print((found_probs - expected_probs).abs().max())
+        #for fprob, eprob in zip(found_probs.tolist(), expected_probs.tolist()):
+        #    print(f"{fprob:.4f}\t{eprob:.4f}")
         self.assertTrue(torch.allclose(
             found_probs,
             expected_probs,
