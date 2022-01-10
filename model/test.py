@@ -168,28 +168,32 @@ class Word2VecModelTest(TestCase):
 
     def test_get_head_probs(self):
 
-        vocab_size = 100
-        embedding_dim = 4
-        Px = torch.tensor([1/100] * 100)
-        model = m.FlatModel(vocab_size, embedding_dim, Px) 
+        kernel = [0,5,4,3,2,1]
+        sampler = m.sp.ConvSampler(kernel)
         tokens_batch = torch.tensor([
-            [0,90, 91,92,93,94,95,96,97,98], 
-            [0,80,81,82,83,84,85,86,87,88]
+            [0,90, 91,92,93,94,95,96,97,98,0], 
+            [0,80,81,82,83,84,85,86,87,88,0]
         ])
         num_sentences, num_tokens = tokens_batch.shape
+        mask = torch.tensor(
+            [[False]*(num_tokens-1)+[True]]*num_sentences, dtype=torch.bool)
 
         # Test the function.
-        found_probs = model.get_head_probs(num_tokens)
+        found_probs = sampler.get_head_probs(tokens_batch, mask)
 
         # Calculate the expected value.
-        kernel = torch.tensor([0,5,4,3,2,1])
-        expected_probs = self.calculate_expected_head_probs(kernel, num_tokens)
+        expected_probs = self.calculate_expected_head_probs(
+            num_sentences, num_tokens, kernel)
+        expected_probs[:,num_tokens-1,:] = 0
+        expected_probs[:,num_tokens-1,0] = 1
+        expected_probs[:,:,num_tokens-1] = 0
 
         self.assertTrue(torch.equal(found_probs, expected_probs))
 
 
-    def calculate_expected_head_probs(self, kernel, num_tokens):
+    def calculate_expected_head_probs(self, num_sentences, num_tokens, kernel):
 
+        kernel = torch.tensor(kernel)
         conv = torch.zeros(num_tokens)
         truncated_size = min(num_tokens, kernel.shape[0])
         conv[:truncated_size] += kernel[:truncated_size]
@@ -204,6 +208,8 @@ class Word2VecModelTest(TestCase):
         expected_probs[:,0] = 0
         expected_probs[0] = torch.nn.functional.one_hot(
             torch.tensor(0),num_tokens)
+        expected_probs = expected_probs.unsqueeze(0).expand(
+            num_sentences, num_tokens, num_tokens)
         return expected_probs
 
 
@@ -213,14 +219,21 @@ class Word2VecModelTest(TestCase):
 
         vocab_size = 100
         embedding_dim = 4
-        Px = torch.tensor([1/100] * 100)
-        model = m.FlatModel(vocab_size, embedding_dim, Px) 
-        tokens_batch = torch.tensor([[0,90, 91,92,93,94,95,96,97,98]])
-        tokens_batch = tokens_batch.expand((2000,-1))
+        num_sentences = 2000
+        Nx = torch.tensor([1] * vocab_size)
+        model = m.FlatModel(vocab_size, embedding_dim, Nx) 
+        tokens_batch = torch.tensor([[0,90, 91,92,93,94,95,96,97,98,0]])
+        tokens_batch = tokens_batch.expand((num_sentences,-1))
+
+        mask = torch.tensor([[
+            False, False, False, False, False, False, 
+            False, False, False, False, True
+        ]])
+        mask = mask.expand((num_sentences,-1))
+
         num_sentences, num_tokens = tokens_batch.shape
 
         # Test the function.
-        mask = torch.zeros(tokens_batch.shape, dtype=torch.bool)
         head_ptrs = model.sample_parses(tokens_batch, mask)
 
         # We will check which tokens chose <ROOT> as head.
@@ -228,11 +241,13 @@ class Word2VecModelTest(TestCase):
         zero_heads = (head_ptrs == ROOT)
 
         # Every <ROOT> chooses itself as head.
-        for i in range(num_sentences):
-            self.assertTrue(zero_heads[i,ROOT])
+        self.assertTrue(zero_heads[:,0].all())
+
+        # Every <PAD> chooses <ROOT> as head.
+        self.assertTrue(zero_heads[mask].all())
 
         # No others choose <ROOT> as head
-        self.assertTrue(zero_heads.sum() == num_sentences)
+        self.assertTrue(zero_heads.sum() == 2 * num_sentences)
 
         # Now check how far away each token's chosen head is.  The conv
         # tensor below sets the relative probability of choosing a head at
@@ -255,6 +270,7 @@ class Word2VecModelTest(TestCase):
                 # A head should never be selected beyond the support of the
                 # kernel.  The following line would trigger an index error if
                 # so.
+                if mask[i,j]: continue
                 dist_counts[distances[i,j]] += 1
 
         # Adjust counts to exclude <ROOT> choosing itself in each sentence.
@@ -271,8 +287,8 @@ class Word2VecModelTest(TestCase):
         vocab_size = 10
         embedding_dim=4
         num_sentences = 10000
-        Px = torch.tensor([1/vocab_size] * vocab_size)
-        model = m.FlatModel(vocab_size, embedding_dim, Px) 
+        Nx = torch.tensor([1] * vocab_size)
+        model = m.FlatModel(vocab_size, embedding_dim, Nx) 
         num_metropolis_hastings_steps = 20
 
         # By using the full vocabulary consecutively in one sentence, it will
@@ -280,17 +296,19 @@ class Word2VecModelTest(TestCase):
         num_tokens = vocab_size
         tokens_batch = torch.arange(num_tokens).unsqueeze(0)
         tokens_batch = tokens_batch.expand((num_sentences,-1))
+        mask = torch.zeros_like(tokens_batch, dtype=torch.bool)
         num_sentences, num_tokens = tokens_batch.shape
 
-        kernel = torch.tensor([0,5,4,3,2,1])
-        probs = self.calculate_expected_head_probs(kernel, num_tokens)
+        kernel = [0,5,4,3,2,1]
+        probs = self.calculate_expected_head_probs(
+            num_sentences, num_tokens, kernel)
         sampler = torch.distributions.Categorical(probs)
-        samples = sampler.sample((num_sentences,))
+        samples = sampler.sample()
 
         heads = tokens_batch.gather(dim=1,index=samples)
         new_heads = heads.clone()
         for i in range(num_metropolis_hastings_steps):
-            new_heads = model.sample_tokens(tokens_batch, new_heads)
+            new_heads = model.sample_tokens(tokens_batch, new_heads, mask)
 
         # We're going to check which tokens chose <ROOT> as head.
         chose_root = (new_heads == 0)
@@ -336,6 +354,85 @@ class Word2VecModelTest(TestCase):
         self.assertTrue(torch.allclose(counts, probs, atol=1e-2))
 
 
+
+    def test_sample_parses_rebased(self):
+
+        seed_random(0)
+
+        vocab_size = 100
+        embedding_dim = 4
+        num_sentences = 2000
+        Nx = torch.arange(vocab_size, 0, -1)
+        model = m.RebasedFlatModel(vocab_size, embedding_dim, Nx) 
+
+
+        tokens_batch = torch.tensor([[0,90, 91,92,93,94,95,96,97,98,0]])
+        tokens_batch = tokens_batch.expand((num_sentences,-1))
+
+        mask = torch.tensor([[
+            False, False, False, False, False, False, 
+            False, False, False, False, True
+        ]])
+        mask = mask.expand((num_sentences,-1))
+
+        num_sentences, num_tokens = tokens_batch.shape
+
+        # Test the function.
+        head_ptrs = model.sample_parses(tokens_batch, mask)
+
+        # We will check which tokens chose <ROOT> as head.
+        ROOT = 0
+        zero_heads = (head_ptrs == ROOT)
+
+        # Every <ROOT> chooses itself as head.
+        self.assertTrue(zero_heads[:,0].all())
+
+        # Every <PAD> chooses <ROOT> as head.
+        self.assertTrue(zero_heads[mask].all())
+
+        # No others choose <ROOT> as head
+        self.assertTrue(zero_heads.sum() == 2 * num_sentences)
+
+        # Now check how far away each token's chosen head is.  The conv
+        # tensor below sets the relative probability of choosing a head at
+        # various distances.  
+        # Note that the expected probability is slightly different than 
+        # the relative probabilities in conv because tokens near the ends of
+        # sentences have truncated selection probabilities.
+        conv = torch.tensor([0,5,4,3,2,1])
+        expected_prob = torch.tensor([
+            0.0000, 0.3967, 0.2724, 0.1847, 0.1018, 0.0444])
+
+        # Calculate the distances as the difference between the value at 
+        # head_ptrs (index of head) and the index corresponding to that value
+        # (index of dependent).
+        dist_counts = torch.zeros(conv.shape[0])
+        locations = torch.arange(num_tokens).unsqueeze(0)
+        distances = (head_ptrs - locations).abs()
+        for i in range(num_sentences):
+            for j in range(num_tokens):
+                # A head should never be selected beyond the support of the
+                # kernel.  The following line would trigger an index error if
+                # so.
+                if mask[i,j]: continue
+                dist_counts[distances[i,j]] += 1
+
+        # Adjust counts to exclude <ROOT> choosing itself in each sentence.
+        dist_counts[0] -= num_sentences
+
+        # Confirm frequency of distances are close to expected probability.
+        found_prob = dist_counts / dist_counts.sum()
+
+        # TODO: test this taking into account both token probability and
+        # position.  Maybe a couple point tests, where we look at the
+        # distribution of heads (j) for a given token (i), which will be 
+        # different from one i to the next...
+        #
+        # The probability distribution is no longer a function of distance
+        # only, so this is a bit harder to test...
+        #self.assertTrue(torch.allclose(found_prob, expected_prob, atol=1e-02))
+
+
 class TestDictionary(TestCase):
 
     def test_dictionary(self):
@@ -374,7 +471,7 @@ class ParityTokenSamplerTest(TestCase):
         # Build the sampler, and read the batch from the dataset.  Adjust
         # padding
         Px = dataset.Nx / dataset.Nx.sum()
-        sampler = m.sp.ParityTokenSampler(Px)
+        sampler = m.st.ParityTokenSampler(Px)
         batches, batch_idx = dataset[0]
 
         head_ptrs_batch = batches[0][1]
@@ -474,7 +571,7 @@ class ParityTokenSamplerTest(TestCase):
         # Sampling a smaller vocabulary gives faster convergence.
         restricted_vocab = 26 # full vocab of ten-sentence-dataset is 145
         Px_restricted_vocab = dataset.Px[:restricted_vocab]
-        token_sampler = m.sp.ParityTokenSampler(Px_restricted_vocab)
+        token_sampler = m.st.ParityTokenSampler(Px_restricted_vocab)
 
         # Continually resample the sentence.  Every resampling generates
         # two mutated sentences, one with "even" tokens mutated and one with
@@ -759,11 +856,50 @@ class QuadTreeCounter:
         self.tree_counter = {tree:0 for tree in self.trees}
 
 
-@skip("Long test")
-class ParseSamplingMeasureTests(TestCase):
+class SpeedTest(TestCase):
+
+    def test_speed(self):
+
+        seed_random(0)
+        embedding_dimension = 250
+        vocab_limit = 100000
+
+        sampler = m.sp.ConvRandomTree()
+        data = m.PaddedDatasetParallel(
+            m.const.DEFAULT_GOLD_DATA_DIR,
+            #m.const.WIKI_DATA_PATH,
+            padding=0,
+            min_length=3,
+            max_length=140,
+            approx_chunk_size=1*m.const.KB,
+            vocab_limit=vocab_limit
+        )
+        embedding = m.EmbeddingLayer(vocab_limit,embedding_dimension)
+
+        j = -1
+        for (small_batch, large_batch), batch_idx in data:
+            for batch in (small_batch, large_batch):
+                j += 1
+                if j != 20:
+                    continue
+                tokens_batch, _, _, mask = batch
+                if len(tokens_batch) == 0:
+                    continue
+                start = time.time()
+                sys.stdout.write(f"{j}:")
+                sys.stdout.flush()
+                found_trees = sampler.sample_parses(
+                    tokens_batch, embedding, mask)
+                elapsed = time.time() - start
+                sys.stdout.write(f"{elapsed}\n")
+                sys.stdout.flush()
+
+
+
+class TestTreeSamplers(TestCase):
 
     def test_random_tree_uniform(self):
-        sampler = m.sp.RandomTree()
+        sampler = m.sp.SimpleRandomTree()
         self.uniform_test(sampler)
 
     def test_contention_uniform(self):
@@ -827,6 +963,11 @@ class ParseSamplingMeasureTests(TestCase):
             atol=0.0035
         ))
 
+
+    def test_conv_random_tree_nonuniform(self):
+        sampler = m.sp.ConvRandomTree()
+        self.nonuniform_test(sampler)
+
     def test_random_tree_nonuniform(self):
         sampler = m.sp.SimpleRandomTree()
         self.nonuniform_test(sampler)
@@ -838,78 +979,10 @@ class ParseSamplingMeasureTests(TestCase):
     def test_contention_nonuniform(self):
         sampler = m.sp.ContentionParseSampler()
         self.nonuniform_test(sampler)
-        
+
     def test_cycle_proof_rooting_nonuniform(self):
         sampler = m.sp.CycleProofRootingParseSampler()
         self.nonuniform_test(sampler)
-
-
-
-
-
-    def test_random_tree_algorithm(self):
-        seed_random(0)
-
-        start = time.time()
-        vocab = 5
-        num_samples = 10000
-
-        # Embedding layer random.  Each tree should have a probability 
-        # proportional to its energy
-        embedding = m.EmbeddingLayer(vocab,4)
-
-        tokens = torch.tensor([[0,1,2,3,PAD,PAD,PAD]])
-        mask = torch.tensor([[0,0,0,0,1,1,1]], dtype=torch.bool)
-
-        sentence_energy = embedding.sentence_link_energy(tokens, mask=mask)
-        sentence_energy[:,:,0] = 0
-
-        trees = torch.tensor([
-            [0,0,1,2,PAD,PAD,PAD],
-            [0,0,3,1,PAD,PAD,PAD],
-            [0,0,1,1,PAD,PAD,PAD],
-            [0,2,0,1,PAD,PAD,PAD],
-            [0,3,0,2,PAD,PAD,PAD],
-            [0,2,0,2,PAD,PAD,PAD],
-            [0,2,3,0,PAD,PAD,PAD],
-            [0,3,1,0,PAD,PAD,PAD],
-            [0,3,3,0,PAD,PAD,PAD],
-        ])
-        num_trees, num_tokens = trees.shape
-
-        tree_energies = (
-            sentence_energy.expand((num_trees, -1, -1)).gather(
-                dim=2, index=trees.unsqueeze(2))).sum(dim=2).sum(dim=1)
-
-        expected_tree_probs = torch.exp(tree_energies)
-        expected_tree_probs = expected_tree_probs / expected_tree_probs.sum()
-
-        probs = torch.exp(sentence_energy).expand(
-            (num_samples, num_tokens, num_tokens)).clone()
-        mask = mask.expand(num_samples, num_tokens)
-        tokens = tokens.expand(num_samples, num_tokens)
-
-        random_tree_sampler = m.sp.SimpleRandomTree()
-        tree_counter = {tuple(row) : 0 for row in trees.tolist()}
-
-        start = time.time()
-        found_trees = random_tree_sampler.sample_parses(tokens, embedding, mask)
-        elapsed = time.time() - start
-        #print("elapsed", elapsed)
-        for i in range(num_samples):
-            tree_counter[tuple(found_trees[i].tolist())] += 1
-
-        found_tree_probs = torch.tensor([
-            tree_counter[tuple(tree)] / num_samples
-            for tree in trees.tolist()
-        ])
-        zipped = zip(found_tree_probs.tolist(), expected_tree_probs.tolist())
-        #for found, expected in zipped:
-        #    print(f"{found:.4f}\t{expected:.4f}")
-
-        self.assertTrue(torch.allclose(
-            found_tree_probs, expected_tree_probs, atol=3e-3))
-
 
     def get_tree_probs(
         self,
@@ -996,8 +1069,8 @@ class ParseSamplingMeasureTests(TestCase):
         torch.set_printoptions(sci_mode=False)
         #print("Elapsed:", elapsed)
         #print((found_probs - expected_probs).abs().max())
-        #for fprob, eprob in zip(found_probs.tolist(), expected_probs.tolist()):
-        #    print(f"{fprob:.4f}\t{eprob:.4f}")
+        for fprob, eprob in zip(found_probs.tolist(), expected_probs.tolist()):
+            print(f"{fprob:.4f}\t{eprob:.4f}")
         self.assertTrue(torch.allclose(
             found_probs,
             expected_probs,

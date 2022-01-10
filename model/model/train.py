@@ -1,6 +1,7 @@
 import os
 import sys
 import pdb
+import math
 import time
 import random
 from collections import defaultdict
@@ -13,47 +14,7 @@ import model as m
 def train_flat():
 
     lr = 1e-3
-    num_epochs = 100
-    batch_size = 100
-    embed_dim = 300
-    vocab_limit = 250000
-
-    # TODO: Can padding be zero like elsewhere?
-    # Get the data, model, and optimizer.
-    data = m.PaddedDatasetParallel(
-        #m.const.DEFAULT_GOLD_DATA_DIR,
-        m.const.WIKI_DATA_PATH,
-        padding=-1,
-        min_length=3,
-        max_length=140,
-        has_heads=False,
-        has_relations=False,
-        approx_chunk_size=100*m.const.KB,
-        vocab_limit=vocab_limit
-    )
-
-    dataloader = torch.utils.data.DataLoader(
-        dataset=data,
-        shuffle=True,
-        #num_workers=2,
-        pin_memory=True
-    )
-
-    model = m.FlatModel(len(data.dictionary), embed_dim, data.Nx)
-    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-    scheduler = Scheduler()
-
-    # Train the model on the data with the optimizer.
-    train_model(model, dataloader, optimizer, scheduler, num_epochs)
-
-    pdb.set_trace()
-    return model
-
-
-def train_edge(load_existing_path=None):
-
-    lr = 1e-3
-    num_epochs = 100
+    num_epochs = 1
     batch_size = 100
     embed_dim = 300
     vocab_limit = 250000
@@ -68,7 +29,46 @@ def train_edge(load_existing_path=None):
         max_length=140,
         has_heads=False,
         has_relations=False,
-        approx_chunk_size=1*m.const.KB,
+        approx_chunk_size=200*m.const.KB,
+        vocab_limit=vocab_limit
+    )
+
+    dataloader = torch.utils.data.DataLoader(
+        dataset=data,
+        shuffle=True,
+        #num_workers=2,
+        pin_memory=True
+    )
+
+    model = m.RebasedFlatModel(len(data.dictionary), embed_dim, data.Nx)
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+    scheduler = Scheduler()
+
+    # Train the model on the data with the optimizer.
+    train_model(model, dataloader, optimizer, scheduler, num_epochs)
+
+    pdb.set_trace()
+    return model
+
+
+def train_edge(load_existing_path=None):
+
+    lr = 2e-3
+    num_epochs = 100
+    embed_dim = 300
+    vocab_limit = 250000
+
+    # TODO: Can padding be zero like elsewhere?
+    # Get the data, model, and optimizer.
+    data = m.PaddedDatasetParallel(
+        #m.const.DEFAULT_GOLD_DATA_DIR,
+        m.const.WIKI_DATA_PATH,
+        padding=0,
+        min_length=3,
+        max_length=140,
+        has_heads=False,
+        has_relations=False,
+        approx_chunk_size=200*m.const.KB,
         vocab_limit=vocab_limit
     )
     batch = data[0]
@@ -132,22 +132,27 @@ class Scheduler:
 
 def train_model(model, dataloader, optimizer, scheduler, num_epochs):
 
+    num_sentences_processed = 0
+    start = time.time()
     for epoch in range(num_epochs):
         print("epoch:", epoch)
         epoch_loss = torch.tensor(0.)
-
-        permutation = list(range(len(dataloader.dataset)))
-        random.shuffle(permutation)
-        start = time.time()
-        num_sentences_processed = 0
         num_batches = len(dataloader)
         for batch_num, batch in enumerate(dataloader):
 
             scheduler.tick()
-            tokens_batch, _, _, mask, batch_idx = batch
-            batch_idx = batch_idx.item()
+            batches, batch_idx = batch
+            batch_idx = batch_idx
 
-            for tokens_chunk, mask_chunk in zip(tokens_batch, mask):
+            if batch_num == math.floor(num_batches * 1/3):
+                pdb.set_trace()
+            if batch_num == math.floor(num_batches * 2/3):
+                pdb.set_trace()
+
+            for batch in batches:
+                tokens_chunk, _, _, mask_chunk = batch
+                if len(tokens_chunk) == 0:
+                    continue
 
                 tokens_chunk = tokens_chunk.squeeze(0)
                 mask_chunk = mask_chunk.squeeze(0)
@@ -174,7 +179,7 @@ def train_model(model, dataloader, optimizer, scheduler, num_epochs):
                     )
                     epoch_loss += loss/(num_edges)
 
-            if batch_num % 4 == 0:
+            if batch_num % 1 == 0:
                 with torch.no_grad():
                     print(loss)
                     print_model(model, dataloader.dataset.dictionary)
@@ -185,7 +190,7 @@ def train_model(model, dataloader, optimizer, scheduler, num_epochs):
 def print_model(model, dictionary):
     words = [
         "chocolate", "Chicago", "challenge", "night",
-        "cat", "burn", "fortified", "strange"
+        "cat", "burn", "cruise", "stranger"
     ]
     for word in words:
         word_id = dictionary.get_id(word)
