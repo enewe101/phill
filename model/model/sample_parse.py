@@ -44,7 +44,6 @@ class ConvSampler:
 
         return head_probs
 
-
     def sample_parses(self, tokens_batch, mask):
         head_probs = self.get_head_probs(tokens_batch, mask)
         head_selector = torch.distributions.Categorical(head_probs)
@@ -72,8 +71,7 @@ class RebasedConvSampler(ConvSampler):
 class ContentionRandomTree():
 
     def sample_parses(
-        self, tokens_batch, embedding, mask=False, start_temp=1, temp_step=0.000
-    ):
+        self, tokens_batch, embedding, mask=False):
         """
         The approach here is to randomly select all heads, and then resolve any
         issues by reselecting heads for all tokens involved in said issues.
@@ -82,59 +80,55 @@ class ContentionRandomTree():
         """
 
         num_sentences, num_tokens = tokens_batch.shape
-        temp = start_temp
         energy = embedding.sentence_link_energy(tokens_batch, mask)
-        contenders = torch.tensor([[True]]).expand(tokens_batch.shape)
+        probs = torch.exp(energy)
+        probs[:,:,0] = self.init_epsilon(probs, mask)
+        #probs[:,:,0] = 1
+        contenders = torch.ones_like(tokens_batch, dtype=torch.bool)
         heads = torch.zeros(tokens_batch.shape, dtype=torch.long)
-        while True:
+        i = 0
+        while contenders.any():
+            i += 1
 
-            head_selector = torch.distributions.Categorical(
-                torch.exp(energy/temp))
-            temp += temp_step
+            head_selector = torch.distributions.Categorical(probs)
             heads_sample = head_selector.sample()
             heads = torch.where(contenders, heads_sample, heads)
 
-            # Find contentions: cycles or multiple roots.
-            has_cycle = self.has_cycle(heads)
-            is_multiple_root = self.is_multiple_root(heads, mask)
+            # Parses that contain multiple roots should be restarted.
+            has_multiple_roots = self.has_multiple_roots(heads, mask)
+            heads[has_multiple_roots,:] = 0
+            contenders[has_multiple_roots,:] = True
+            probs[has_multiple_roots,:,0] = probs[has_multiple_roots,:,0] / 1.1
 
-            # Resample nodes involved in contentions.
-            has_contention = has_cycle.logical_or(is_multiple_root)
+            # Find cycles.  Those tokens need to re-select their head.
+            has_cycle, cycle_lengths = self.has_cycle(heads)
+            contenders = has_cycle.logical_or(has_multiple_roots.unsqueeze(1))
 
-            # Break once all sentences have no contentions.
-            if not has_contention.any():
-                break
-
-            # Try selecting only one contentious element per sentence.
-            # (For sentences without contention, harmlessly select <ROOT>.
-            contenders = has_contention
-            #contenders = self.keep_one_contender(has_contention)
-
+            if i % 100 == 0:
+                avg_cycle_length = cycle_lengths.sum() / has_cycle.any(dim=1).sum()
+                print("\ncycles:", contenders.any(dim=1).sum())
+                print("avg cycle length:", avg_cycle_length)
+                print("multiple_roots:", has_multiple_roots.sum(), "\n")
 
         return heads
 
-
-    def keep_one_contender(self, has_contention):
-        select_contender = torch.where(
-            has_contention.sum(dim=1,keepdim=True).to(torch.bool),
-            has_contention,
-            one_hot(
-                torch.tensor(0), has_contention.shape[1]
-            ).to(torch.bool).unsqueeze(0)
-        )
-        contenders = torch.distributions.Categorical(select_contender).sample()
-        contenders = one_hot(contenders, has_contention.shape[1]).to(torch.bool)
-        return contenders
+    def init_epsilon(self, probs, mask):
+        out_weights = probs.sum(dim=2)
+        max_out_weight = out_weights.max(dim=1, keepdim=True).values
+        num_sentences, num_tokens = mask.shape
+        unpadded_num_tokens = num_tokens - mask.sum(dim=1, keepdim=True)
+        epsilon = max_out_weight / unpadded_num_tokens * ROOT_MASS
+        return epsilon
 
 
-    def is_multiple_root(self, heads, mask):
+    def has_multiple_roots(self, heads, mask):
         # Get the non-PADDING tokens that have ROOT as head.
         rooted = (heads == 0).logical_and(mask.logical_not())
         # Eliminate ROOT itself
         rooted[:,0] = False
         # Determine which sentences have more than one root.
-        has_multiple_roots = rooted.sum(dim=1, keepdim=True) > 1
-        return torch.where(has_multiple_roots, rooted, False)
+        has_multiple_roots = rooted.sum(dim=1) > 1
+        return has_multiple_roots
 
 
     def has_cycle(self, heads):
@@ -149,13 +143,19 @@ class ContentionRandomTree():
         self_head = torch.arange(
             heads.shape[1]).unsqueeze(0).expand(heads.shape)
         ancestors = heads.clone()
+        cycle_lengths = torch.zeros(heads.shape[0], dtype=torch.int)
         for i in range(max_steps):
-            has_cycle = has_cycle.logical_or(ancestors == self_head)
+            found_cycle = ancestors == self_head
+            found_cycle[:,0] = False
+            found_new_cycle = found_cycle.any(dim=1).logical_and(
+                has_cycle.any(dim=1).logical_not())
+            cycle_lengths[found_new_cycle] = i
+            has_cycle = has_cycle.logical_or(found_cycle)
             ancestors = heads.gather(dim=1, index=ancestors)
 
         # ROOT is trivially cycled due to self-link, but we don't care about it.
         has_cycle[:,0] = 0
-        return has_cycle
+        return has_cycle, cycle_lengths
         
 
 

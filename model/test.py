@@ -864,7 +864,7 @@ class SpeedTest(TestCase):
         embedding_dimension = 250
         vocab_limit = 100000
 
-        sampler = m.sp.ConvRandomTree()
+        sampler = m.sp.ContentionRandomTree()
         data = m.PaddedDatasetParallel(
             m.const.DEFAULT_GOLD_DATA_DIR,
             #m.const.WIKI_DATA_PATH,
@@ -880,8 +880,6 @@ class SpeedTest(TestCase):
         for (small_batch, large_batch), batch_idx in data:
             for batch in (small_batch, large_batch):
                 j += 1
-                if j != 20:
-                    continue
                 tokens_batch, _, _, mask = batch
                 if len(tokens_batch) == 0:
                     continue
@@ -902,8 +900,8 @@ class TestTreeSamplers(TestCase):
         sampler = m.sp.SimpleRandomTree()
         self.uniform_test(sampler)
 
-    def test_contention_uniform(self):
-        sampler = m.sp.ContentionParseSampler()
+    def test_contention_random_tree_uniform(self):
+        sampler = m.sp.ContentionRandomTree()
         self.uniform_test(sampler)
 
     def test_contention_uniform(self):
@@ -966,6 +964,10 @@ class TestTreeSamplers(TestCase):
 
     def test_conv_random_tree_nonuniform(self):
         sampler = m.sp.ConvRandomTree()
+        self.nonuniform_test(sampler)
+
+    def test_contention_random_tree_nonuniform(self):
+        sampler = m.sp.ContentionRandomTree()
         self.nonuniform_test(sampler)
 
     def test_random_tree_nonuniform(self):
