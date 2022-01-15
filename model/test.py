@@ -900,6 +900,14 @@ class TestTreeSamplers(TestCase):
         sampler = m.sp.SimpleRandomTree()
         self.uniform_test(sampler)
 
+    def test_contraction_random_tree_uniform(self):
+        sampler = m.sp.ContractionRandomTree()
+        self.uniform_test(sampler)
+
+    def test_cycle_escape_random_tree_uniform(self):
+        sampler = m.sp.CycleEscapeRandomTree()
+        self.uniform_test(sampler)
+
     def test_contention_random_tree_uniform(self):
         sampler = m.sp.ContentionRandomTree()
         self.uniform_test(sampler)
@@ -964,6 +972,15 @@ class TestTreeSamplers(TestCase):
 
     def test_conv_random_tree_nonuniform(self):
         sampler = m.sp.ConvRandomTree()
+        self.nonuniform_test(sampler)
+
+    def test_contraction_random_tree_nonuniform(self):
+        seed_random(0)
+        sampler = m.sp.ContractionRandomTree()
+        self.nonuniform_test(sampler)
+
+    def test_cycle_escape_random_tree_nonuniform(self):
+        sampler = m.sp.CycleEscapeRandomTree()
         self.nonuniform_test(sampler)
 
     def test_contention_random_tree_nonuniform(self):

@@ -61,8 +61,8 @@ def train_edge(load_existing_path=None):
     # TODO: Can padding be zero like elsewhere?
     # Get the data, model, and optimizer.
     data = m.PaddedDatasetParallel(
-        #m.const.DEFAULT_GOLD_DATA_DIR,
-        m.const.WIKI_DATA_PATH,
+        m.const.DEFAULT_GOLD_DATA_DIR,
+        #m.const.WIKI_DATA_PATH,
         padding=0,
         min_length=3,
         max_length=140,
