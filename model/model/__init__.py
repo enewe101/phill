@@ -7,6 +7,7 @@ import model.dictionary
 from model.dictionary import Dictionary
 import model.dataset
 from model.dataset import PaddedDatasetParallel
+import model.contraction_random_tree
 import model.sample_parse as sp
 import model.sample_token as st
 import model.timer

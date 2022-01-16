@@ -9,7 +9,7 @@ class EdgeModel:
     def __init__(self, vocab_size, embed_dim, Px):
         self.embedding = m.EmbeddingLayer(vocab_size, embed_dim)
         self.token_sampler = m.st.ParityTokenSampler(Px)
-        self.parse_sampler = m.sp.ContractionRandomTree()
+        self.parse_sampler = m.sp.ContractionRandomTreeSampler()
         self.start_temp = 1
         self.temp_step = 0.01
 
