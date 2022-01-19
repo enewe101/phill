@@ -6,10 +6,8 @@ import random
 import itertools as it
 from unittest import TestCase, main, skip
 from collections import Counter
-
 import numpy as np
 import torch
-
 import model as m
 
 
@@ -17,11 +15,11 @@ PAD = 0
 TEST_DATA_PATH = os.path.join(os.path.dirname(__file__), "test-data")
 SCRATCH_DATA_PATH = os.path.join(TEST_DATA_PATH, "scratch")
 
+
 def seed_random(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-
 
 
 class TestVisualization(TestCase):
@@ -48,6 +46,7 @@ class TestVisualization(TestCase):
 
 class DatasetTest(TestCase):
 
+
     def read_expected_sentences(self, path):
         expected_sentences = set()
         with open(path) as f:
@@ -56,7 +55,6 @@ class DatasetTest(TestCase):
                     continue
                 expected_sentences.add(line.strip())
         return expected_sentences
-
 
 
     def test_padded_dataset_parallel_limit_vocab_Nx(self):
@@ -91,7 +89,6 @@ class DatasetTest(TestCase):
                 expected_tokens_batch[high_ids] = unk_id
                 self.assertTrue(torch.equal(
                     tokens_batch, expected_tokens_batch))
-
 
 
     def test_padded_dataset_parallel(self):

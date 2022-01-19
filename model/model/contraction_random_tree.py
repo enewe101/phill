@@ -4,21 +4,28 @@ import torch
 ROOT_MASS = 0.5
 
 
+class ScalarContractionRandomTree():
+
+    def sample(self, energy, mask):
+
 
 class ContractionRandomTree():
 
     energy_epsilon_adjust = -0.09
-    def sample(s, tokens_batch, embedding, mask):
-        heads = s.contract(tokens_batch, embedding, mask)
-        trees = s.extract()
-        return trees
+
+    def sample(s, energy, mask):
+        heads = s.contract(energy, mask)
+        rooted_trees = s.extract()
+        selected_trees = s.select_root(rooted_trees, mask)
+        return selected_trees
 
 
-    def init(s, tokens_batch, energy, mask):
-        s.num_sentences, s.num_tokens = tokens_batch.shape
-        s.energy = energy.clone()
+    def init(s, energy, mask):
+        s.num_sentences, s.num_tokens, _ = energy.shape
+        s.energy = energy.clone() # We'll mutate this during cycle resolution.
+        s.energy_ = energy  # keep a reference to the pristine energy.
         s.heads = torch.full((s.num_sentences, 2*s.num_tokens, 2), -1)
-        s.num_real_tokens = s.num_tokens - mask.sum(dim=1) - 1
+        s.num_real_tokens = s.num_tokens - mask.sum(dim=1)
         s.children = torch.zeros(
             (s.num_sentences, 2*s.num_tokens, 2*s.num_tokens), dtype=torch.bool)
         s.cycle_heads = torch.full((s.num_sentences, 2*s.num_tokens), -1)
@@ -30,9 +37,11 @@ class ContractionRandomTree():
                 (s.num_sentences, s.num_tokens, s.num_tokens))
 
 
-    def contract(s, tokens_batch, energy, mask):
-        s.init(tokens_batch, energy, mask)
-        s.super_ptrs = torch.ones(s.num_sentences, dtype=torch.long)
+    def contract(s, energy, mask):
+        s.init(energy, mask)
+        s.super_ptrs = torch.distributions.Categorical(
+            mask.logical_not()).sample()
+        #s.super_ptrs = torch.ones(s.num_sentences, dtype=torch.long)
         active = torch.ones((s.num_sentences,), dtype=torch.bool)
         while active.any():
 
@@ -179,10 +188,7 @@ class ContractionRandomTree():
         # We're sampling accross potentially multiple simple-nodes that make
         # up this super-node.  Flatten the energy array for each sentence.
         pick_energy = pick_energy.flatten(start_dim=1, end_dim=2)
-        try:
-            picked_raw = torch.distributions.Categorical(pick_energy.exp()).sample()
-        except:
-            pdb.set_trace()
+        picked_raw = torch.distributions.Categorical(pick_energy.exp()).sample()
         heads = torch.empty((active.sum(), 2), dtype=torch.long)
         # Recover specific source and target from the flattened position.
         heads[:,0] = (picked_raw / s.num_tokens).floor() # simple-node source
@@ -191,55 +197,127 @@ class ContractionRandomTree():
 
 
     def extract(s):
+        s.energy = s.energy_    # recover the pristine energy.
 
-        s.to_dismantle = torch.full((s.num_sentences, s.num_tokens), -1)
+        # We'll build a different tree for each possible sentence root.
+        # Thus trees[sent, token] will contain a tree for sent rooted at token.
+        trees = torch.full(s.energy.shape, -1)
 
-        # Begin by dismantling around <ROOT>.  This will enqueue super nodes
-        # to be dismantled.
-        ROOTs = torch.zeros((s.num_sentences,), dtype=torch.long)
-        s.dismantle(ROOTs)
+        # Start with root 0, we'll iterate.  Sentence stays active if it
+        # has a real token (not mask) at position `root`.
+        root = 0
+        active = (root < s.num_real_tokens)
+        while active.any():
 
-        # Now dismantle super_nodes that got queued.
-        active = (s.to_dismantle[:,0] != -1)
+            # Get the trees rooted at `root`.
+            roots = torch.full((s.num_sentences,), -1)
+            roots[active] = root
+            trees[active, root] = s.extract_for_root(roots)
+
+            # Proceed to the next root (if any sentences are still active)
+            root += 1
+            active = root < s.num_real_tokens
+
+        return trees
+
+
+    def select_root(s, trees, mask):
+        tree_energies = torch.full(trees.shape, -torch.inf)
+        root = 0
+        active = (root < s.num_real_tokens)
+        while active.any():
+            heads = trees[active, root]
+
+            # ROOT and PAD appear as -1s.  Set them harmlessly to 0 so that
+            # indexing does not error.  We'll kill this spurious energy below.
+            head_mask = (heads == -1)
+            heads_masked = heads.clone()
+            heads_masked[head_mask] = 0
+            energy = s.energy[active].gather(
+                dim=2, index=heads_masked.unsqueeze(2))
+
+            # Now kill energy for ROOT and PAD.
+            energy[head_mask] = 0
+            # Store the energy for sentences parsed on this root.
+            tree_energies[active, root] = energy.squeeze(2)
+
+            # Advance root, and check which sentences are still active.
+            root += 1
+            active = (root < s.num_real_tokens)
+
+        # Now sample
+        probs = tree_energies.sum(dim=2).exp()
+        pdb.set_trace()
+        selected_tree_ptr = torch.distributions.Categorical(probs).sample()
+        per_sentence = torch.arange(s.num_sentences)
+        selected_trees = trees[per_sentence,selected_tree_ptr]
+
+        return selected_trees
+
+
+    def extract_for_root(s, roots):
+
+        # We will be mutating `s.parent`, keep a pristine copy to restore later.
+        s.parent_ = s.parent.clone()
+        heads = s.heads.clone()
+
+        # As we process sentences they become inactive.  Remember which sentences
+        # were active to begin with.
+        was_active = (roots != -1)
+
+        # Begin by dismantling around <ROOT>.  This will enqueue other super 
+        # nodes in `to_dismantle`.
+        to_dismantle = torch.full((s.num_sentences, s.num_tokens), -1)
+        s.dismantle(to_dismantle, roots)
+        active = (to_dismantle[:,0] != -1)
+
+        # Dismantle super_nodes queued by side effect of s.dismantle()
         while active.any():
 
             # Pop an element per sentence to dismantle.
-            ptr = s.to_dismantle[:,0]
-            s.to_dismantle = s.to_dismantle[:,1:]
+            ptr = to_dismantle[:,0]
+            to_dismantle = to_dismantle[:,1:]
 
             # The outgoing arc from ptr is kept in the final tree.
             src_head = torch.full((s.num_sentences, 2), -1)
             head_ptr = ptr[active].unsqueeze(1).unsqueeze(2).expand(-1,-1,2)
-            src_head = s.heads[active].gather(index=head_ptr, dim=1).squeeze(1)
+            src_head = heads[active].gather(index=head_ptr, dim=1).squeeze(1)
             src = torch.full((s.num_sentences,) , -1)
             src[active] = src_head[:,0]
-            s.heads[active, src[active]] = src_head  # inserts into tree.
+            heads[active, src[active]] = src_head  # inserts into tree.
 
-            # Dismantle src (this may add super nodes to s.to_dismantle
-            s.dismantle(src)
+            # Dismantle src (this may add super nodes to to_dismantle
+            s.dismantle(to_dismantle, src)
 
             # Where is there still work to do?
-            active = (s.to_dismantle[:,0] != -1)
+            active = (to_dismantle[:,0] != -1)
 
         # We do not keep the head chosen by <ROOT>, because it is the root.
-        result = s.heads[:,:s.num_tokens,1]
-        result[:,0] = 0
+        result = heads[:,:s.num_tokens,1]
+
+        # Designate the root token with a -1 in the heads array.
+        result[was_active, roots] = -1
+
+        # Restore pristine parents.
+        s.parent = s.parent_
+
         return result
 
 
-    def dismantle(s, ptr):
+    def dismantle(s, to_dismantle, ptr):
+        ptr = ptr.clone()
 
         # Pointer is active if it is not -1 and if it's parent is not -1
         ptr_active = (ptr != -1)
-        parent = s.parent[ptr_active, ptr[ptr_active]]
-        ptr_active[ptr_active.clone()] = (parent !=  -1)
-        parent = s.parent[ptr_active, ptr[ptr_active]]
+        active_parent = s.parent[ptr_active, ptr[ptr_active]]
+        ptr_active[ptr_active.clone()] = (active_parent !=  -1)
+        active_parent = s.parent[ptr_active, ptr[ptr_active]]
         while ptr_active.any():
 
             # Find siblings of 
             # Get next sibling.
             sibling = torch.zeros((s.num_sentences,2*s.num_tokens), dtype=bool)
-            sibling[ptr_active] = s.children[ptr_active, parent]
+            sibling[ptr_active] = s.children[ptr_active, active_parent]
 
             # Unset each sibling's parent
             s.parent[sibling] = -1
@@ -251,33 +329,26 @@ class ContractionRandomTree():
             sib_has_children[ptr_active, ptr[ptr_active]] = False
 
             # Add siblings with children to the dismantling "queue".
-            start_index = s.next_available_slot().unsqueeze(1)
+            start_index = s.next_available_slot(to_dismantle).unsqueeze(1)
             end_index = start_index + sib_has_children.sum(dim=1).unsqueeze(1)
             position = torch.arange(2*s.num_tokens)
             position = position.unsqueeze(0).expand((
                 s.num_sentences, 2*s.num_tokens))
             allocation = (
-                position[:,:s.to_dismantle.shape[1]] >= start_index
+                position[:,:to_dismantle.shape[1]] >= start_index
             ).logical_and(
-                position[:,:s.to_dismantle.shape[1]] < end_index
+                position[:,:to_dismantle.shape[1]] < end_index
             )
-            s.to_dismantle[allocation] = position[sib_has_children]
+            to_dismantle[allocation] = position[sib_has_children]
 
             # Move pointer to parent.  Apply same activity criterion as before.
-            ptr[ptr_active] = parent
+            ptr[ptr_active] = active_parent
             ptr_active = (ptr != -1)
-            parent = s.parent[ptr_active, ptr[ptr_active]]
-            ptr_active[ptr_active.clone()] = (parent != -1)
-            parent = s.parent[ptr_active, ptr[ptr_active]]
+            active_parent = s.parent[ptr_active, ptr[ptr_active]]
+            ptr_active[ptr_active.clone()] = (active_parent != -1)
+            active_parent = s.parent[ptr_active, ptr[ptr_active]]
 
 
-    def next_available_slot(s):
-        return s.to_dismantle.shape[1] - (s.to_dismantle==-1).sum(dim=1)
-
-
-    def get_preroot(s):
-        preroot = (s.heads[:,:,1] == 0)
-        preroot[:,0] = False
-        preroot = preroot.to(torch.int).argmax(dim=1)
-        return preroot
+    def next_available_slot(s, to_dismantle):
+        return to_dismantle.shape[1] - (to_dismantle==-1).sum(dim=1)
 

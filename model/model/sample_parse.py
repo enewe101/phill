@@ -6,13 +6,34 @@ import time
 
 
 class ContractionRandomTreeSampler():
+"""
+Similar to Edmonds algorithm, except that instead of selecting max edge
+at various points in the algorithm, we sample according to edge weight.
+Cycles are contracted, and edge weights are updated as in Edmonds algorithm.
+
+I feel like some version of this should work.  Right now it is off-distribution
+and it is so complicated that I'm not confident its even implemented correctly.
+
+I am falling back to writing the single-sentence implementation, which maybe
+is what I should be doing this whole time.  Had I realized how deep sampling
+could go I would have experimented with simple 1-sentence parsers first!
+"""
 
     def sample_parses(self, tokens_batch, embedding, mask):
         energy = embedding.sentence_link_energy(tokens_batch, mask)
-        energy[:,:,0] = torch.log(self.init_epsilon(torch.exp(energy), mask))
+        #energy[:,:,0] = torch.log(self.init_epsilon(torch.exp(energy), mask))
         energy[mask,:] = -torch.inf
-        return m.contraction_random_tree.ContractionRandomTree().sample(
-            tokens_batch, energy, mask)
+        energy = energy[:,1:,1:]
+        mask = mask[:,1:]
+        heads = torch.zeros(tokens_batch.shape, dtype=torch.long)
+        sample = m.contraction_random_tree.ContractionRandomTree().sample(
+            energy, mask)
+        # All positions will be shifted once to the right to make space for 
+        # <ROOT>.
+        sample = sample + 1
+        heads[:,1:] = sample
+
+        return heads
 
 
     def init_epsilon(self, probs, mask):
@@ -29,7 +50,12 @@ ROOT_MASS = 0.5
 
 
 class ConvSampler:
-    
+"""
+Same idea as in word2vec or glove, etc.  The probability of node A selecting 
+node B depends only on their relative positions, and the weight given to 
+relative positions by the convolution kernel.
+"""
+
     default_kernel = [0,5,4,3,2,1]
     def __init__(self, kernel=None):
         self.kernel = self.default_kernel if kernel is None else kernel
@@ -74,6 +100,15 @@ class ConvSampler:
 
 
 class RebasedConvSampler(ConvSampler):
+    """
+    Change the objective function, by applying the same post-target-distribution
+    rejection.  Normally this would mean not learning the right thing, however,
+    if you apply the same post-target-distribution rejection to both the 
+    observed distribution and the model distribution, it seems to preserve
+    some of the learning characteristics while possibly doing a kind of 
+    importance sampling work.  Why do this instead of actual importance sampling?
+    Dunno.  Just tried it.
+    """
 
     def __init__(self, Nx, kernel=None):
         super().__init__(kernel)
@@ -90,19 +125,25 @@ class RebasedConvSampler(ConvSampler):
 
 
 
-
-
 class CycleEscapeRandomTree():
+"""
+Sample a random tree with probability roughly in proportion to the exp of the sum
+of the energies for directed node edges.
+
+In this case, we almost follow the random tree algorith, except that we treat
+the creation of cycles differently: when a cycle is found, we momentarily 
+contract it, altering the weights of nodes invovled in the cycle, so that we
+can draw an out-of-cycle edge directly, without cycling for a potentially long
+time.
+
+This turns out to make basically no difference to the cycle-sticking behaviour
+of RandomTree: as the model trains, sentences take longer and longer to parse
+because cycles are constantly formed and reformed.
+"""
 
     energy_epsilon_adjust = -0.09
     def sample_parses(
         self, tokens_batch, embedding, mask=False):
-        """
-        The approach here is to randomly select all heads, and then resolve any
-        issues by reselecting heads for all tokens involved in said issues.
-        There are two possible issues: cycles, and having more than one node that
-        selects <ROOT>.
-        """
 
         num_sentences, num_tokens = tokens_batch.shape
         energy = embedding.sentence_link_energy(tokens_batch, mask)
@@ -248,6 +289,18 @@ class CycleEscapeRandomTree():
 
 
 class ContentionRandomTree():
+"""
+This is similar to RandomTree only in the sense that it uses the idea of
+including a root node, and rejecting trees that have more than one node whose
+head is the root node.
+
+Otherwise it is more like the Contention sampler: it selects a head for all
+nodes, and, if any cycles are generated, it reselects all nodes in the cycle
+(continuing reselection until there are no cycles).
+
+After each re-selection, if ever there is more than one node that has taken
+<ROOT> as its head, the sampler is reset for that item in the batch.
+"""
 
     def sample_parses(
         self, tokens_batch, embedding, mask=False):
@@ -284,12 +337,14 @@ class ContentionRandomTree():
             contenders = has_cycle.logical_or(has_multiple_roots.unsqueeze(1))
 
             if i % 100 == 0:
-                avg_cycle_length = cycle_lengths.sum() / has_cycle.any(dim=1).sum()
+                avg_cycle_length = (
+                    cycle_lengths.sum() / has_cycle.any(dim=1).sum())
                 print("\ncycles:", contenders.any(dim=1).sum())
                 print("avg cycle length:", avg_cycle_length)
                 print("multiple_roots:", has_multiple_roots.sum(), "\n")
 
         return heads
+
 
     def init_epsilon(self, probs, mask):
         out_weights = probs.sum(dim=2)
@@ -341,6 +396,15 @@ class ContentionRandomTree():
 
 
 class ContentionParseSampler():
+"""
+The contention parser begins by selecting a head for each node, and then
+flats any nodes that choose root in a multiple-root situation or that are 
+involved in cycles.  These nodes are flagged as "contenders" in that they are
+still choosing their head and are in contention.  Contender's heads are 
+re-sampled, and then the nodes in contention are recalculated, etc.
+
+I believe this is both off-distribution and gets cycle-trapped.
+"""
 
     def sample_parses(
         self, tokens_batch, embedding, mask=False, start_temp=1, temp_step=0.000
@@ -433,6 +497,18 @@ class ContentionParseSampler():
 
 
 class CycleProofRootingParseSampler:
+"""
+This algorithm is similar to random tree in some respects, although its handling
+of cycles and multiple-roots are both a bit different.
+
+In cycles, the cycle is not erased, rather, the walk simply continues and the
+very next head selection is likely to resolve the cycle by choosing an
+out-of-cycle head.  Of course, that depends on the size of the cycle, and on
+the internal, vs external energy opportunities given the particular token-token
+energies.
+
+It's off distribution, and suffers from the same cycle trapping issue.
+"""
 
     def sample_parses(
         self, tokens_batch, embedding, mask, start_temp=1, temp_step=0.1
@@ -586,6 +662,15 @@ class CycleProofRootingParseSampler:
 
 
 class WalkSampler:
+"""
+In this sampler, we simply take a random walk along directed edges, according
+to the probability.  The root is considered to be whatever node we have just
+moved to, unless and until we take another step, in which case the new leading
+token is root.
+
+I believe this algorithm is valid for undirected trees, but fails somehow
+in the directed case.  Not tested.  I just think I read that somewhere.
+"""
 
     def sample_parses(
         self, tokens_batch, embedding, mask, start_temp=1, temp_step=0
@@ -646,7 +731,14 @@ class WalkSampler:
         return head_ptrs
 
 
+
 class ConvRandomTree:
+"""
+Applies a position-dependent weight convolution to the embedding-derived
+probability.  Something like this is what I really want in the end.  I believe
+this is on-distribution, but it suffers from the same cycle-trapping that 
+RandomTree and others suffer from.
+"""
 
     kernel = [torch.tensor(v) for v in [0,5,4,3,2,1]]
 
@@ -696,6 +788,10 @@ class ConvRandomTree:
 
 
 class SimpleRandomTree():
+"""
+The one and only, as a sentence parser.  On-distribution, but suffers from
+cycle trapping.
+"""
 
     def sample_parses(self, tokens, embedding, mask):
         # Adjust the probabilities to make p.
